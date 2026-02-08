@@ -12,6 +12,7 @@ def convert_voltage_to_mmhg_o2(voltage_signal):
     Convert O2 voltage signal to mmHg
 
     Based on calibration: 1% O2 = 0.1V, 10% O2 = 1V
+    (i.e. 20% O2 = 2V)
 
     Parameters
     ----------
@@ -27,6 +28,23 @@ def convert_voltage_to_mmhg_o2(voltage_signal):
     B_O2 = ((10 / 100) * 760) - (A_O2 * 1)
 
     return A_O2 * voltage_signal + B_O2
+
+
+def convert_pct_to_mmhg_o2(pct_signal):
+    """
+    Convert O2 percent concentration signal to mmHg
+
+    Parameters
+    ----------
+    pct_signal : array-like
+        O2 values in percent concentration (e.g. 20 for 20%)
+
+    Returns
+    -------
+    array-like
+        O2 values in mmHg
+    """
+    return (pct_signal / 100) * 760
 
 
 def convert_voltage_to_mmhg_co2(voltage_signal):
@@ -49,6 +67,23 @@ def convert_voltage_to_mmhg_co2(voltage_signal):
     B_CO2 = ((5 / 100) * 760) - (A_CO2 * 5)
 
     return A_CO2 * voltage_signal + B_CO2
+
+
+def convert_pct_to_mmhg_co2(pct_signal):
+    """
+    Convert CO2 percent concentration signal to mmHg
+
+    Parameters
+    ----------
+    pct_signal : array-like
+        CO2 values in percent concentration (e.g. 5 for 5%)
+
+    Returns
+    -------
+    array-like
+        CO2 values in mmHg
+    """
+    return (pct_signal / 100) * 760
 
 
 def convert_gas_channels(df, co2_channel=None, o2_channel=None):
@@ -96,14 +131,20 @@ def convert_gas_channels(df, co2_channel=None, o2_channel=None):
                 o2_channel = col
                 break
 
-    # Convert CO2 if channel found
+    # Convert CO2 if channel found (detect Pct vs Volts from column name)
     if co2_channel and co2_channel in df.columns:
-        df['CO2(mmHg)'] = convert_voltage_to_mmhg_co2(df[co2_channel])
+        if '(pct)' in co2_channel.lower():
+            df['CO2(mmHg)'] = convert_pct_to_mmhg_co2(df[co2_channel])
+        else:
+            df['CO2(mmHg)'] = convert_voltage_to_mmhg_co2(df[co2_channel])
         conversions['co2'] = 'CO2(mmHg)'
 
-    # Convert O2 if channel found
+    # Convert O2 if channel found (detect Pct vs Volts from column name)
     if o2_channel and o2_channel in df.columns:
-        df['O2(mmHg)'] = convert_voltage_to_mmhg_o2(df[o2_channel])
+        if '(pct)' in o2_channel.lower():
+            df['O2(mmHg)'] = convert_pct_to_mmhg_o2(df[o2_channel])
+        else:
+            df['O2(mmHg)'] = convert_voltage_to_mmhg_o2(df[o2_channel])
         conversions['o2'] = 'O2(mmHg)'
 
     return df, conversions

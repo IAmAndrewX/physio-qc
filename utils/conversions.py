@@ -131,17 +131,22 @@ def convert_gas_channels(df, co2_channel=None, o2_channel=None):
                 o2_channel = col
                 break
 
-    # Convert CO2 if channel found (detect Pct vs Volts from column name)
+    # Detect Pct vs Volts for O2 from values: gas analyzer max is 10V,
+    # so any O2 value > 10 means the channel is in percent concentration.
+    # CO2 is 1:1 (Volts == Pct) so the conversion is identical either way.
+    o2_is_pct = False
+    if o2_channel and o2_channel in df.columns:
+        if df[o2_channel].max() > 10:
+            o2_is_pct = True
+
+    # Convert CO2 if channel found
     if co2_channel and co2_channel in df.columns:
-        if '(pct)' in co2_channel.lower():
-            df['CO2(mmHg)'] = convert_pct_to_mmhg_co2(df[co2_channel])
-        else:
-            df['CO2(mmHg)'] = convert_voltage_to_mmhg_co2(df[co2_channel])
+        df['CO2(mmHg)'] = convert_voltage_to_mmhg_co2(df[co2_channel])
         conversions['co2'] = 'CO2(mmHg)'
 
-    # Convert O2 if channel found (detect Pct vs Volts from column name)
+    # Convert O2 if channel found (Pct vs Volts based on value range)
     if o2_channel and o2_channel in df.columns:
-        if '(pct)' in o2_channel.lower():
+        if o2_is_pct:
             df['O2(mmHg)'] = convert_pct_to_mmhg_o2(df[o2_channel])
         else:
             df['O2(mmHg)'] = convert_voltage_to_mmhg_o2(df[o2_channel])

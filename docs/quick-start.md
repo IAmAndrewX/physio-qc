@@ -196,8 +196,8 @@ ETO2:
 
 ## 📚 Further Reading
 
-- `INSTALLATION_COMPLETE.md` - Detailed technical documentation
-- `ETCO2_ETO2_INTEGRATION_GUIDE.md` - Architecture and design notes
+- `installation-guide.md` - Detailed technical documentation
+- `etco2-eto2-integration-guide.md` - Architecture and design notes
 - `config.py` - See all available parameters
 - `metrics/etco2.py` - Read algorithm documentation
 - `metrics/eto2.py` - Read algorithm documentation

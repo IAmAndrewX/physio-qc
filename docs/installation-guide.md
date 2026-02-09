@@ -247,7 +247,7 @@ eto2_troughs,        # Trough encoding
 - `config.py` - Configuration with all parameters
 - `app.py` - Main Streamlit application
 - `ETCO2_ETO2_TAB_CODE.py` - Tab implementation code to insert
-- `ETCO2_ETO2_INTEGRATION_GUIDE.md` - Detailed technical documentation
+- `etco2-eto2-integration-guide.md` - Detailed technical documentation
 - `utils/peak_editing.py` - Manual editing utilities
 
 ## ✅ Verification Checklist

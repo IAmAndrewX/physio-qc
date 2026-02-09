@@ -567,7 +567,12 @@ def main():
                 st.error("File not found")
                 return
 
-            data = load_acq_file(file_path)
+            data = load_acq_file(
+                file_path,
+                participant=participant,
+                session=session,
+                task=task
+            )
 
             if data is None:
                 st.error("Failed to load file")
@@ -598,6 +603,18 @@ def main():
             **Sampling Rate**: {data['sampling_rate']} Hz
             **Signals**: {', '.join(data['signal_mappings'].keys())}
             """)
+
+            pmu_status = data.get('pmu_status', {})
+            if pmu_status.get('attempted'):
+                if pmu_status.get('success'):
+                    scan_idx = pmu_status.get('scan_index')
+                    strategy = pmu_status.get('match_strategy', 'unknown')
+                    st.success(
+                        f"PMU Session B enrichment active: scan #{scan_idx} "
+                        f"(match: {strategy})"
+                    )
+                else:
+                    st.warning(f"PMU enrichment not applied: {pmu_status.get('message', 'unknown reason')}")
 
     if not st.session_state.data_loaded:
         st.info("👈 Select data from the sidebar to begin")

@@ -21,6 +21,18 @@ SPIROMETRY_DATA_PATH = '/export02/projects/LCS/03_spirometry'
 # Session labels where spirometry QC should be displayed
 SPIROMETRY_SESSION_A_ALIASES = ['ses-a', 'a', 'session-a', 'ses-01', 'ses-1', 'session-1']
 
+# Session labels that should load scanner PMU pulse/respiration into Streamlit
+PMU_SESSION_B_ALIASES = ['ses-b', 'b', 'session-b', 'ses-02', 'ses-2', 'session-2']
+
+# Siemens PMU + BIDS paths/sessions used for Session B enrichment
+PMU_BIDS_BASE_PATH = '/export02/projects/LCS/BIDS'
+PMU_BIDS_SESSION = 'ses-02'
+PMU_PHYSIO_SESSION = 'ses-2'
+PMU_SAMPLING_RATE = 400
+PMU_SCAN_GAP_SECONDS = 10.0
+PMU_TIME_MATCH_TOLERANCE_SECONDS = 30.0
+PMU_PREFER_SCANNER_SIGNALS = True
+
 # Fallback Biopac channel for spirometer waveform (1-based index)
 SPIROMETER_CHANNEL_INDEX = 12
 

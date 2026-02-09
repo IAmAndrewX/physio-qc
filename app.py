@@ -123,6 +123,12 @@ def init_session_state():
     if 'spo2_zoom_range' not in st.session_state:
         st.session_state.spo2_zoom_range = None
 
+    if 'spirometer_result' not in st.session_state:
+        st.session_state.spirometer_result = None
+
+    if 'spirometer_params' not in st.session_state:
+        st.session_state.spirometer_params = config.DEFAULT_RSP_PARAMS.copy()
+
 
 def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name, sampling_rate,
                        hr_interpolated=None, hr_bpm=None, quality_continuous=None,
@@ -241,6 +247,259 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     return fig
 
 
+def is_session_a_selected(session_label):
+    """Return True when current session should show the external spirometry placeholder."""
+    aliases = {str(alias).strip().lower() for alias in config.SPIROMETRY_SESSION_A_ALIASES}
+    return str(session_label).strip().lower() in aliases
+
+
+def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_title, plot_label):
+    """Render an RSP-style processing tab (used for RSP belt and spirometer waveform)."""
+    params_state_key = f"{state_prefix}_params"
+    result_state_key = f"{state_prefix}_result"
+
+    st.header(header_title)
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        method = st.selectbox("Cleaning Method", config.RSP_CLEANING_METHODS, key=f'{state_prefix}_method')
+        with st.expander("ℹ️ Method Info"):
+            st.info(config.RSP_CLEANING_INFO.get(method, "No info available"))
+
+    with col2:
+        amplitude_method = st.selectbox("Amplitude Normalization", config.RSP_AMPLITUDE_METHODS, key=f'{state_prefix}_amplitude')
+        with st.expander("ℹ️ Amplitude Info"):
+            st.info(config.RSP_AMPLITUDE_INFO.get(amplitude_method, "No info available"))
+
+    if st.button(f"Process {plot_label}", type="primary", key=f'process_{state_prefix}'):
+        signal = data['df'][data['signal_mappings'][signal_key]].values
+
+        params = {
+            'method': method,
+            'amplitude_method': amplitude_method if amplitude_method != 'none' else None
+        }
+        st.session_state[params_state_key].update(params)
+
+        result = rsp.process_rsp(signal, sampling_rate, st.session_state[params_state_key])
+
+        if result is None:
+            st.error("Processing failed: insufficient breaths detected")
+        else:
+            st.session_state[result_state_key] = result
+            st.success(f"{plot_label} processed successfully")
+
+    if st.session_state[result_state_key] is not None:
+        result = st.session_state[result_state_key]
+
+        st.subheader("Manual Breath Editing")
+
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Auto Inhalations", len(result['auto_peaks']))
+        with col2:
+            st.metric("Auto Exhalations", len(result['auto_troughs']))
+        with col3:
+            n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
+            st.metric("Added Inhalations", n_added_peaks)
+        with col4:
+            n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
+            st.metric("Added Exhalations", n_added_troughs)
+
+        time = np.arange(len(result['clean'])) / sampling_rate
+
+        from metrics.rsp import calculate_breathing_rate
+        if len(result['current_troughs']) > 1:
+            br_data = calculate_breathing_rate(
+                result['current_troughs'],
+                sampling_rate,
+                len(result['clean']),
+                rate_method=st.session_state[params_state_key].get('rate_method', 'monotone_cubic')
+            )
+            result.update(br_data)
+        else:
+            result['br_bpm'] = np.array([])
+            result['br_interpolated'] = np.zeros(len(result['clean']))
+            result['mean_br'] = 0.0
+            result['std_br'] = 0.0
+
+        region_start_key = f'{state_prefix}_region_start'
+        region_end_key = f'{state_prefix}_region_end'
+        if region_start_key not in st.session_state:
+            st.session_state[region_start_key] = 0.0
+        if region_end_key not in st.session_state:
+            st.session_state[region_end_key] = min(10.0, float(time[-1]))
+
+        signal_zoom = (st.session_state[region_start_key], st.session_state[region_end_key])
+
+        fig = create_rsp_bp_plot(
+            time, result['raw'], result['clean'],
+            result['current_peaks'], result['current_troughs'],
+            result['auto_peaks'], result['auto_troughs'],
+            plot_label,
+            rate_interpolated=result.get('br_interpolated'),
+            rate_bpm=result.get('br_bpm'),
+            ui_revision=f'{state_prefix}_plot',
+            zoom_range=signal_zoom
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.subheader("Drag-Based Breath Editing")
+        st.write("**Quick Range Selection:**")
+        col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
+        with col_btn1:
+            if st.button("⏮️ First 10s", key=f'{state_prefix}_first_10s'):
+                st.session_state[region_start_key] = 0.0
+                st.session_state[region_end_key] = min(10.0, float(time[-1]))
+                st.rerun()
+        with col_btn2:
+            if st.button("◀️ Previous 10s", key=f'{state_prefix}_prev_10s'):
+                window = 10.0
+                new_start = max(0.0, st.session_state[region_start_key] - window)
+                new_end = max(window, st.session_state[region_end_key] - window)
+                st.session_state[region_start_key] = new_start
+                st.session_state[region_end_key] = min(new_end, float(time[-1]))
+                st.rerun()
+        with col_btn3:
+            if st.button("▶️ Next 10s", key=f'{state_prefix}_next_10s'):
+                window = 10.0
+                new_start = min(float(time[-1]) - window, st.session_state[region_start_key] + window)
+                new_end = min(float(time[-1]), st.session_state[region_end_key] + window)
+                st.session_state[region_start_key] = new_start
+                st.session_state[region_end_key] = new_end
+                st.rerun()
+        with col_btn4:
+            if st.button("⏭️ Last 10s", key=f'{state_prefix}_last_10s'):
+                st.session_state[region_start_key] = max(0.0, float(time[-1]) - 10.0)
+                st.session_state[region_end_key] = float(time[-1])
+                st.rerun()
+        with col_btn5:
+            if st.button("🔄 Reset Range", key=f'{state_prefix}_reset_range'):
+                st.session_state[region_start_key] = 0.0
+                st.session_state[region_end_key] = min(10.0, float(time[-1]))
+                st.rerun()
+
+        st.write("**Manual Range Entry:** (Or look at zoomed plot X-axis and enter values)")
+        col1, col2 = st.columns(2)
+        with col1:
+            region_start = st.number_input(
+                "Region Start (s)",
+                min_value=0.0,
+                max_value=float(time[-1]),
+                value=float(st.session_state[region_start_key]),
+                step=1.0,
+                format="%.2f",
+                key=f'{state_prefix}_region_start_input',
+                help="Enter the start time from the zoomed plot's X-axis, or use quick buttons above"
+            )
+            st.session_state[region_start_key] = region_start
+        with col2:
+            region_end = st.number_input(
+                "Region End (s)",
+                min_value=0.0,
+                max_value=float(time[-1]),
+                value=float(st.session_state[region_end_key]),
+                step=1.0,
+                format="%.2f",
+                key=f'{state_prefix}_region_end_input',
+                help="Enter the end time from the zoomed plot's X-axis, or use quick buttons above"
+            )
+            st.session_state[region_end_key] = region_end
+
+        st.caption(f"Current range: {region_start:.2f}s to {region_end:.2f}s ({region_end - region_start:.2f}s window) | Full signal: {float(time[-1]):.2f}s")
+
+        st.write("**Inhalation Peaks:**")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("➕ Add Inhalation Peaks", type="primary", key=f'{state_prefix}_add_peaks_btn', use_container_width=True):
+                st.session_state[result_state_key]['current_peaks'] = peak_editing.add_peaks_in_range(
+                    result['clean'], result['current_peaks'], region_start, region_end, sampling_rate, min_distance_seconds=1.0
+                )
+                st.rerun()
+        with col2:
+            if st.button("➖ Remove Inhalation Peaks", type="secondary", key=f'{state_prefix}_remove_peaks_btn', use_container_width=True):
+                st.session_state[result_state_key]['current_peaks'] = peak_editing.erase_peaks_in_range(
+                    result['current_peaks'], region_start, region_end, sampling_rate
+                )
+                st.rerun()
+        with col3:
+            if st.button("🔄 Reset Inhalations", key=f'{state_prefix}_reset_peaks_btn', use_container_width=True):
+                st.session_state[result_state_key]['current_peaks'] = result['auto_peaks'].copy()
+                st.rerun()
+
+        st.write("**Exhalation Troughs:**")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("➕ Add Exhalation Troughs", type="primary", key=f'{state_prefix}_add_troughs_btn', use_container_width=True):
+                st.session_state[result_state_key]['current_troughs'] = peak_editing.add_troughs_in_range(
+                    result['clean'], result['current_troughs'], region_start, region_end, sampling_rate, min_distance_seconds=1.0
+                )
+                st.rerun()
+        with col2:
+            if st.button("➖ Remove Exhalation Troughs", type="secondary", key=f'{state_prefix}_remove_troughs_btn', use_container_width=True):
+                st.session_state[result_state_key]['current_troughs'] = peak_editing.erase_troughs_in_range(
+                    result['current_troughs'], region_start, region_end, sampling_rate
+                )
+                st.rerun()
+        with col3:
+            if st.button("🔄 Reset Exhalations", key=f'{state_prefix}_reset_troughs_btn', use_container_width=True):
+                st.session_state[result_state_key]['current_troughs'] = result['auto_troughs'].copy()
+                st.rerun()
+
+        with st.expander("✏️ Single Peak/Trough Editing (Advanced)"):
+            st.write("Add or remove individual peaks/troughs at specific times.")
+            col1, _ = st.columns(2)
+            with col1:
+                single_time = st.number_input(
+                    "Time (seconds)",
+                    min_value=0.0,
+                    max_value=float(time[-1]),
+                    value=0.0,
+                    step=0.1,
+                    key=f'{state_prefix}_single_time'
+                )
+
+            st.write("**Inhalation Peaks:**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("Add Inhalation at Time", key=f'{state_prefix}_single_add_peak'):
+                    st.session_state[result_state_key]['current_peaks'] = peak_editing.add_peak(
+                        result['clean'], result['current_peaks'], single_time, sampling_rate
+                    )
+                    st.rerun()
+            with col_b:
+                if st.button("Delete Inhalation at Time", key=f'{state_prefix}_single_del_peak'):
+                    st.session_state[result_state_key]['current_peaks'] = peak_editing.delete_peak(
+                        result['current_peaks'], single_time, sampling_rate
+                    )
+                    st.rerun()
+
+            st.write("**Exhalation Troughs:**")
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("Add Exhalation at Time", key=f'{state_prefix}_single_add_trough'):
+                    st.session_state[result_state_key]['current_troughs'] = peak_editing.add_trough(
+                        result['clean'], result['current_troughs'], single_time, sampling_rate
+                    )
+                    st.rerun()
+            with col_b:
+                if st.button("Delete Exhalation at Time", key=f'{state_prefix}_single_del_trough'):
+                    st.session_state[result_state_key]['current_troughs'] = peak_editing.delete_trough(
+                        result['current_troughs'], single_time, sampling_rate
+                    )
+                    st.rerun()
+
+        st.subheader("Statistics")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Final Breath Count", len(result['current_troughs']))
+        with col2:
+            st.metric("Mean BR", f"{result['mean_br']:.1f} bpm")
+        with col3:
+            st.metric("BR Std Dev", f"{result['std_br']:.1f} bpm")
+
+
 def main():
     """Main application function"""
     init_session_state()
@@ -308,7 +567,12 @@ def main():
                 st.error("File not found")
                 return
 
-            data = load_acq_file(file_path)
+            data = load_acq_file(
+                file_path,
+                participant=participant,
+                session=session,
+                task=task
+            )
 
             if data is None:
                 st.error("Failed to load file")
@@ -327,6 +591,7 @@ def main():
             st.session_state.etco2_result = None
             st.session_state.eto2_result = None
             st.session_state.spo2_result = None
+            st.session_state.spirometer_result = None
 
             st.success(f"Loaded {file_path}")
 
@@ -339,6 +604,18 @@ def main():
             **Signals**: {', '.join(data['signal_mappings'].keys())}
             """)
 
+            pmu_status = data.get('pmu_status', {})
+            if pmu_status.get('attempted'):
+                if pmu_status.get('success'):
+                    scan_idx = pmu_status.get('scan_index')
+                    strategy = pmu_status.get('match_strategy', 'unknown')
+                    st.success(
+                        f"PMU Session B enrichment active: scan #{scan_idx} "
+                        f"(match: {strategy})"
+                    )
+                else:
+                    st.warning(f"PMU enrichment not applied: {pmu_status.get('message', 'unknown reason')}")
+
     if not st.session_state.data_loaded:
         st.info("👈 Select data from the sidebar to begin")
         return
@@ -346,12 +623,15 @@ def main():
     data = st.session_state.loaded_data
     sampling_rate = data['sampling_rate']
     detected_signals = list(data['signal_mappings'].keys())
+    session_a_selected = is_session_a_selected(st.session_state.session)
 
     tabs = []
     if 'ecg' in detected_signals:
         tabs.append("ECG")
     if 'rsp' in detected_signals:
         tabs.append("RSP")
+    if 'spirometer' in detected_signals:
+        tabs.append("Spirometer")
     if 'ppg' in detected_signals:
         tabs.append("PPG")
     if 'bp' in detected_signals:
@@ -362,6 +642,8 @@ def main():
         tabs.append("ETO2")
     if 'spo2' in detected_signals:
         tabs.append("SpO2")
+    if session_a_selected:
+        tabs.append("Spirometry")
     tabs.append("Export")
 
     tab_objects = st.tabs(tabs)
@@ -684,256 +966,26 @@ def main():
 
     if 'rsp' in detected_signals:
         with tab_objects[tab_idx]:
-            st.header("RSP Processing")
+            render_rsp_like_tab(
+                data=data,
+                sampling_rate=sampling_rate,
+                signal_key='rsp',
+                state_prefix='rsp',
+                header_title='RSP Processing',
+                plot_label='RSP'
+            )
+        tab_idx += 1
 
-            col1, col2 = st.columns([2, 1])
-
-            with col1:
-                method = st.selectbox("Cleaning Method", config.RSP_CLEANING_METHODS, key='rsp_method')
-                with st.expander("ℹ️ Method Info"):
-                    st.info(config.RSP_CLEANING_INFO.get(method, "No info available"))
-
-            with col2:
-                amplitude_method = st.selectbox("Amplitude Normalization", config.RSP_AMPLITUDE_METHODS, key='rsp_amplitude')
-                with st.expander("ℹ️ Amplitude Info"):
-                    st.info(config.RSP_AMPLITUDE_INFO.get(amplitude_method, "No info available"))
-
-            if st.button("Process RSP", type="primary"):
-                signal = data['df'][data['signal_mappings']['rsp']].values
-
-                params = {
-                    'method': method,
-                    'amplitude_method': amplitude_method if amplitude_method != 'none' else None
-                }
-                st.session_state.rsp_params.update(params)
-
-                result = rsp.process_rsp(signal, sampling_rate, st.session_state.rsp_params)
-
-                if result is None:
-                    st.error("Processing failed: insufficient breaths detected")
-                else:
-                    st.session_state.rsp_result = result
-                    st.success("RSP processed successfully")
-
-            if st.session_state.rsp_result is not None:
-                result = st.session_state.rsp_result
-
-                st.subheader("Manual Breath Editing")
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Auto Inhalations", len(result['auto_peaks']))
-                with col2:
-                    st.metric("Auto Exhalations", len(result['auto_troughs']))
-                with col3:
-                    n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
-                    st.metric("Added Inhalations", n_added_peaks)
-                with col4:
-                    n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
-                    st.metric("Added Exhalations", n_added_troughs)
-
-                time = np.arange(len(result['clean'])) / sampling_rate
-
-                # Recalculate BR based on current troughs
-                from metrics.rsp import calculate_breathing_rate
-                if len(result['current_troughs']) > 1:
-                    br_data = calculate_breathing_rate(
-                        result['current_troughs'],
-                        sampling_rate,
-                        len(result['clean']),
-                        rate_method=st.session_state.rsp_params.get('rate_method', 'monotone_cubic')
-                    )
-                    result.update(br_data)
-                else:
-                    result['br_bpm'] = np.array([])
-                    result['br_interpolated'] = np.zeros(len(result['clean']))
-                    result['mean_br'] = 0.0
-                    result['std_br'] = 0.0
-
-                # Initialize region range in session state if not exists (needed before plotting)
-                if 'rsp_region_start' not in st.session_state:
-                    st.session_state.rsp_region_start = 0.0
-                if 'rsp_region_end' not in st.session_state:
-                    st.session_state.rsp_region_end = min(10.0, float(time[-1]))
-
-                # Get zoom range from session state
-                rsp_zoom = (st.session_state.rsp_region_start, st.session_state.rsp_region_end)
-
-                fig = create_rsp_bp_plot(
-                    time, result['raw'], result['clean'],
-                    result['current_peaks'], result['current_troughs'],
-                    result['auto_peaks'], result['auto_troughs'],
-                    'RSP',
-                    rate_interpolated=result.get('br_interpolated'),
-                    rate_bpm=result.get('br_bpm'),
-                    ui_revision='rsp_plot',  # Preserve zoom state
-                    zoom_range=rsp_zoom  # Apply zoom from region inputs
-                )
-
-                st.plotly_chart(fig, use_container_width=True)
-
-                # Drag-based editing interface
-                st.subheader("Drag-Based Breath Editing")
-
-                # Quick navigation buttons
-                st.write("**Quick Range Selection:**")
-                col_btn1, col_btn2, col_btn3, col_btn4, col_btn5 = st.columns(5)
-                with col_btn1:
-                    if st.button("⏮️ First 10s", key='rsp_first_10s'):
-                        st.session_state.rsp_region_start = 0.0
-                        st.session_state.rsp_region_end = min(10.0, float(time[-1]))
-                        st.rerun()
-                with col_btn2:
-                    if st.button("◀️ Previous 10s", key='rsp_prev_10s'):
-                        window = 10.0
-                        new_start = max(0.0, st.session_state.rsp_region_start - window)
-                        new_end = max(window, st.session_state.rsp_region_end - window)
-                        st.session_state.rsp_region_start = new_start
-                        st.session_state.rsp_region_end = min(new_end, float(time[-1]))
-                        st.rerun()
-                with col_btn3:
-                    if st.button("▶️ Next 10s", key='rsp_next_10s'):
-                        window = 10.0
-                        new_start = min(float(time[-1]) - window, st.session_state.rsp_region_start + window)
-                        new_end = min(float(time[-1]), st.session_state.rsp_region_end + window)
-                        st.session_state.rsp_region_start = new_start
-                        st.session_state.rsp_region_end = new_end
-                        st.rerun()
-                with col_btn4:
-                    if st.button("⏭️ Last 10s", key='rsp_last_10s'):
-                        st.session_state.rsp_region_start = max(0.0, float(time[-1]) - 10.0)
-                        st.session_state.rsp_region_end = float(time[-1])
-                        st.rerun()
-                with col_btn5:
-                    if st.button("🔄 Reset Range", key='rsp_reset_range'):
-                        st.session_state.rsp_region_start = 0.0
-                        st.session_state.rsp_region_end = min(10.0, float(time[-1]))
-                        st.rerun()
-
-                st.write("**Manual Range Entry:** (Or look at zoomed plot X-axis and enter values)")
-                col1, col2 = st.columns(2)
-                with col1:
-                    region_start = st.number_input(
-                        "Region Start (s)",
-                        min_value=0.0,
-                        max_value=float(time[-1]),
-                        value=float(st.session_state.rsp_region_start),
-                        step=1.0,
-                        format="%.2f",
-                        key='rsp_region_start_input',
-                        help="Enter the start time from the zoomed plot's X-axis, or use quick buttons above"
-                    )
-                    # Update session state
-                    st.session_state.rsp_region_start = region_start
-                with col2:
-                    region_end = st.number_input(
-                        "Region End (s)",
-                        min_value=0.0,
-                        max_value=float(time[-1]),
-                        value=float(st.session_state.rsp_region_end),
-                        step=1.0,
-                        format="%.2f",
-                        key='rsp_region_end_input',
-                        help="Enter the end time from the zoomed plot's X-axis, or use quick buttons above"
-                    )
-                    # Update session state
-                    st.session_state.rsp_region_end = region_end
-
-                # Show current range info
-                st.caption(f"Current range: {region_start:.2f}s to {region_end:.2f}s ({region_end - region_start:.2f}s window) | Full signal: {float(time[-1]):.2f}s")
-
-                st.write("**Inhalation Peaks:**")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    if st.button("➕ Add Inhalation Peaks", type="primary", key='rsp_add_peaks_btn', use_container_width=True):
-                        from utils import peak_editing
-                        st.session_state.rsp_result['current_peaks'] = peak_editing.add_peaks_in_range(
-                            result['clean'], result['current_peaks'], region_start, region_end, sampling_rate, min_distance_seconds=1.0
-                        )
-                        st.rerun()
-                with col2:
-                    if st.button("➖ Remove Inhalation Peaks", type="secondary", key='rsp_remove_peaks_btn', use_container_width=True):
-                        from utils import peak_editing
-                        st.session_state.rsp_result['current_peaks'] = peak_editing.erase_peaks_in_range(
-                            result['current_peaks'], region_start, region_end, sampling_rate
-                        )
-                        st.rerun()
-                with col3:
-                    if st.button("🔄 Reset Inhalations", key='rsp_reset_peaks_btn', use_container_width=True):
-                        st.session_state.rsp_result['current_peaks'] = result['auto_peaks'].copy()
-                        st.rerun()
-
-                st.write("**Exhalation Troughs:**")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    if st.button("➕ Add Exhalation Troughs", type="primary", key='rsp_add_troughs_btn', use_container_width=True):
-                        from utils import peak_editing
-                        st.session_state.rsp_result['current_troughs'] = peak_editing.add_troughs_in_range(
-                            result['clean'], result['current_troughs'], region_start, region_end, sampling_rate, min_distance_seconds=1.0
-                        )
-                        st.rerun()
-                with col2:
-                    if st.button("➖ Remove Exhalation Troughs", type="secondary", key='rsp_remove_troughs_btn', use_container_width=True):
-                        from utils import peak_editing
-                        st.session_state.rsp_result['current_troughs'] = peak_editing.erase_troughs_in_range(
-                            result['current_troughs'], region_start, region_end, sampling_rate
-                        )
-                        st.rerun()
-                with col3:
-                    if st.button("🔄 Reset Exhalations", key='rsp_reset_troughs_btn', use_container_width=True):
-                        st.session_state.rsp_result['current_troughs'] = result['auto_troughs'].copy()
-                        st.rerun()
-
-                # Single peak/trough editing
-                with st.expander("✏️ Single Peak/Trough Editing (Advanced)"):
-                    st.write("Add or remove individual peaks/troughs at specific times.")
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        single_time = st.number_input("Time (seconds)", min_value=0.0, max_value=float(time[-1]), value=0.0, step=0.1, key='rsp_single_time')
-
-                    st.write("**Inhalation Peaks:**")
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        if st.button("Add Inhalation at Time", key='rsp_single_add_peak'):
-                            from utils import peak_editing
-                            st.session_state.rsp_result['current_peaks'] = peak_editing.add_peak(
-                                result['clean'], result['current_peaks'], single_time, sampling_rate
-                            )
-                            st.rerun()
-                    with col_b:
-                        if st.button("Delete Inhalation at Time", key='rsp_single_del_peak'):
-                            from utils import peak_editing
-                            st.session_state.rsp_result['current_peaks'] = peak_editing.delete_peak(
-                                result['current_peaks'], single_time, sampling_rate
-                            )
-                            st.rerun()
-
-                    st.write("**Exhalation Troughs:**")
-                    col_a, col_b = st.columns(2)
-                    with col_a:
-                        if st.button("Add Exhalation at Time", key='rsp_single_add_trough'):
-                            from utils import peak_editing
-                            st.session_state.rsp_result['current_troughs'] = peak_editing.add_trough(
-                                result['clean'], result['current_troughs'], single_time, sampling_rate
-                            )
-                            st.rerun()
-                    with col_b:
-                        if st.button("Delete Exhalation at Time", key='rsp_single_del_trough'):
-                            from utils import peak_editing
-                            st.session_state.rsp_result['current_troughs'] = peak_editing.delete_trough(
-                                result['current_troughs'], single_time, sampling_rate
-                            )
-                            st.rerun()
-
-                st.subheader("Statistics")
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Final Breath Count", len(result['current_troughs']))
-                with col2:
-                    st.metric("Mean BR", f"{result['mean_br']:.1f} bpm")
-                with col3:
-                    st.metric("BR Std Dev", f"{result['std_br']:.1f} bpm")
-
+    if 'spirometer' in detected_signals:
+        with tab_objects[tab_idx]:
+            render_rsp_like_tab(
+                data=data,
+                sampling_rate=sampling_rate,
+                signal_key='spirometer',
+                state_prefix='spirometer',
+                header_title='Spirometer Processing (Mask Flow)',
+                plot_label='SPIROMETER'
+            )
         tab_idx += 1
 
     if 'ppg' in detected_signals:
@@ -2201,6 +2253,18 @@ def main():
 
             else:
                 st.info("Configure parameters above and click 'Process SpO2' to begin")
+
+        tab_idx += 1
+
+    # --- SPIROMETRY TAB (Session A) ---
+    if session_a_selected:
+        with tab_objects[tab_idx]:
+            st.header("Spirometry (Session A)")
+            st.warning("External spirometry export is currently disabled (vendor data issue).")
+            st.info(
+                "This tab is a placeholder for the external spirometry report. "
+                "Waveform-level respiratory analysis is available in the new `Spirometer` tab when channel 12 is present."
+            )
 
         tab_idx += 1
 

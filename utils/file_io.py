@@ -10,6 +10,11 @@ import bioread
 
 import config
 from utils.conversions import convert_gas_channels
+from utils.pmu_integration import (
+    extract_pmu_task_signals,
+    resample_signal_to_length,
+    session_matches_alias,
+)
 
 
 def scan_data_directory(base_path):
@@ -120,7 +125,70 @@ def detect_signal_type(column_name):
     return None
 
 
-def load_acq_file(file_path):
+def _attach_pmu_session_b_signals(df_raw, signal_mappings, participant, session, task):
+    """Attach PMU respiration/pulse for Session B when available."""
+    status = {
+        'attempted': False,
+        'success': False,
+        'message': 'PMU integration not attempted for this session.',
+    }
+
+    if not participant or not session or not task:
+        status['message'] = 'PMU integration skipped (missing participant/session/task).'
+        return df_raw, signal_mappings, status
+
+    aliases = getattr(config, 'PMU_SESSION_B_ALIASES', [])
+    if not aliases or not session_matches_alias(session, aliases):
+        return df_raw, signal_mappings, status
+
+    status['attempted'] = True
+    pmu_result = extract_pmu_task_signals(
+        base_physio_path=config.BASE_DATA_PATH,
+        bids_base_path=getattr(config, 'PMU_BIDS_BASE_PATH', config.BASE_DATA_PATH),
+        participant=participant,
+        session=session,
+        task=task,
+        pmu_session=getattr(config, 'PMU_PHYSIO_SESSION', None),
+        bids_session=getattr(config, 'PMU_BIDS_SESSION', None),
+        sampling_rate=getattr(config, 'PMU_SAMPLING_RATE', 400),
+        scan_gap_seconds=getattr(config, 'PMU_SCAN_GAP_SECONDS', 10.0),
+        time_tolerance_seconds=getattr(config, 'PMU_TIME_MATCH_TOLERANCE_SECONDS', 30.0),
+    )
+
+    status['message'] = pmu_result.get('message', 'PMU integration failed.')
+    if not pmu_result.get('success'):
+        return df_raw, signal_mappings, status
+
+    n_samples = len(df_raw)
+    rsp_resampled = resample_signal_to_length(pmu_result['rsp'], n_samples)
+    ppg_resampled = resample_signal_to_length(pmu_result['ppg'], n_samples)
+
+    rsp_column = 'PMU_RESP'
+    ppg_column = 'PMU_PULS'
+    df_raw[rsp_column] = rsp_resampled
+    df_raw[ppg_column] = ppg_resampled
+
+    prefer_pmu = bool(getattr(config, 'PMU_PREFER_SCANNER_SIGNALS', True))
+    if prefer_pmu or 'rsp' not in signal_mappings:
+        signal_mappings['rsp'] = rsp_column
+    if prefer_pmu or 'ppg' not in signal_mappings:
+        signal_mappings['ppg'] = ppg_column
+
+    status.update({
+        'success': True,
+        'match_strategy': pmu_result.get('match_strategy'),
+        'scan_index': pmu_result.get('scan_index'),
+        'scan_duration_sec': pmu_result.get('scan_duration_sec'),
+        'resolved_pmu_session': pmu_result.get('resolved_pmu_session'),
+        'resolved_bids_session': pmu_result.get('resolved_bids_session'),
+        'rsp_column': rsp_column,
+        'ppg_column': ppg_column,
+        'resampled_to_samples': n_samples,
+    })
+    return df_raw, signal_mappings, status
+
+
+def load_acq_file(file_path, participant=None, session=None, task=None):
     """
     Load an ACQ file and return data with metadata
 
@@ -128,6 +196,12 @@ def load_acq_file(file_path):
     ----------
     file_path : str or Path
         Path to ACQ file
+    participant : str, optional
+        Participant ID (e.g., 'sub-2034') for session-aware enrichment.
+    session : str, optional
+        Session ID (e.g., 'ses-02') for session-aware enrichment.
+    task : str, optional
+        Task name (e.g., 'breath') for PMU scan matching.
 
     Returns
     -------
@@ -163,11 +237,26 @@ def load_acq_file(file_path):
             if signal_type not in signal_mappings:
                 signal_mappings[signal_type] = col
 
+    # Fallback: map spirometer from a fixed Biopac channel index when naming is generic
+    if 'spirometer' not in signal_mappings:
+        channel_idx = getattr(config, 'SPIROMETER_CHANNEL_INDEX', None)
+        if isinstance(channel_idx, int) and 1 <= channel_idx <= len(df_raw.columns):
+            signal_mappings['spirometer'] = df_raw.columns[channel_idx - 1]
+
     # Prefer converted mmHg columns over raw voltage columns
     if 'co2' in gas_conversions:
         signal_mappings['etco2'] = gas_conversions['co2']
     if 'o2' in gas_conversions:
         signal_mappings['eto2'] = gas_conversions['o2']
+
+    # Session B: inject Siemens PMU pulse/respiration as PPG/RSP channels.
+    df_raw, signal_mappings, pmu_status = _attach_pmu_session_b_signals(
+        df_raw=df_raw,
+        signal_mappings=signal_mappings,
+        participant=participant,
+        session=session,
+        task=task,
+    )
 
     return {
         'df': df_raw,
@@ -176,5 +265,6 @@ def load_acq_file(file_path):
         'signal_mappings': signal_mappings,
         'n_samples': len(df_raw),
         'duration': len(df_raw) / sampling_rate,
-        'gas_conversions': gas_conversions
+        'gas_conversions': gas_conversions,
+        'pmu_status': pmu_status,
     }

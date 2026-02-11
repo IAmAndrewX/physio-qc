@@ -3,34 +3,40 @@
 ## Setup
 
 ```bash
-uv sync
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
 ## Run
 
 ```bash
-uv run streamlit run app.py
+source .venv/bin/activate
+streamlit run app.py
 ```
 
 ## Static checks
 
 ```bash
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy metrics/ algorithms/ utils/ --ignore-missing-imports
+source .venv/bin/activate
+ruff check .
+ruff format --check .
+mypy metrics/ algorithms/ utils/ --ignore-missing-imports
 ```
 
 Auto-fix formatting/lint:
 
 ```bash
-uv run ruff check --fix .
-uv run ruff format .
+source .venv/bin/activate
+ruff check --fix .
+ruff format .
 ```
 
 ## Tests
 
 ```bash
-uv run pytest -v
+source .venv/bin/activate
+pytest -v
 ```
 
 The repository currently has limited automated UI coverage; Streamlit behavior is still verified manually.

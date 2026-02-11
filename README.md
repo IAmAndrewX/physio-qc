@@ -14,13 +14,6 @@ Session-B PMU enrichment is supported when scanner PMU files are available.
 ## Quick start
 
 ```bash
-uv sync
-uv run streamlit run app.py
-```
-
-Alternative (existing venv):
-
-```bash
 source .venv/bin/activate
 streamlit run app.py
 ```

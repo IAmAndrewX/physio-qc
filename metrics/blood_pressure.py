@@ -3,18 +3,26 @@ Blood pressure signal processing functions
 Pure functions with no classes
 """
 
+import neurokit2 as nk
 import numpy as np
 from scipy.signal import bessel, butter, filtfilt, find_peaks
-import neurokit2 as nk
 
-import config
 from algorithms.bp_delineator import delineate_bp
 from algorithms.quality_detection import detect_calibration_artifacts, filter_indices_outside_regions
 
 
-def filter_bp(signal, sampling_rate, method='bessel_25hz', filter_order=3,
-              cutoff_freq=25, filter_type='butterworth', lowcut=0.5, highcut=15.0,
-              apply_lowcut=True, apply_highcut=True):
+def filter_bp(
+    signal,
+    sampling_rate,
+    method="bessel_25hz",
+    filter_order=3,
+    cutoff_freq=25,
+    filter_type="butterworth",
+    lowcut=0.5,
+    highcut=15.0,
+    apply_lowcut=True,
+    apply_highcut=True,
+):
     """
     Filter blood pressure signal
 
@@ -46,20 +54,19 @@ def filter_bp(signal, sampling_rate, method='bessel_25hz', filter_order=3,
     array
         Filtered blood pressure signal
     """
-    if method == 'bessel_25hz':
-        from scipy.signal import bessel
+    if method == "bessel_25hz":
         wn = float(cutoff_freq) / (float(sampling_rate) / 2.0)
         wn = min(max(wn, 1e-6), 0.999999)
         b, a = bessel(filter_order, wn, btype="low", analog=False, output="ba", norm="phase")
         bp_filtered = filtfilt(b, a, signal)
 
-    elif method == 'butterworth':
+    elif method == "butterworth":
         wn = float(cutoff_freq) / (float(sampling_rate) / 2.0)
         wn = min(max(wn, 1e-6), 0.999999)
         b, a = butter(filter_order, wn, btype="low", analog=False)
         bp_filtered = filtfilt(b, a, signal)
 
-    elif method == 'custom':
+    elif method == "custom":
         bp_filtered = signal.copy()
         low = lowcut if apply_lowcut else None
         high = highcut if apply_highcut else None
@@ -70,7 +77,7 @@ def filter_bp(signal, sampling_rate, method='bessel_25hz', filter_order=3,
                 lowcut=low,
                 highcut=high,
                 method=filter_type,
-                order=filter_order
+                order=filter_order,
             )
     else:
         bp_filtered = signal.copy()
@@ -78,7 +85,7 @@ def filter_bp(signal, sampling_rate, method='bessel_25hz', filter_order=3,
     return bp_filtered
 
 
-def detect_bp_peaks(signal, sampling_rate, method='delineator', prominence=10):
+def detect_bp_peaks(signal, sampling_rate, method="delineator", prominence=10):
     """
     Detect systolic peaks and diastolic troughs in blood pressure signal
 
@@ -101,58 +108,50 @@ def detect_bp_peaks(signal, sampling_rate, method='delineator', prominence=10):
         - troughs: Diastolic trough indices
         - dicrotic_notches: Dicrotic notch indices (delineator only, 0 if not found)
     """
-    if method == 'delineator':
+    if method == "delineator":
         result = delineate_bp(signal, sampling_rate)
-        return {
-            'peaks': result['peaks'],
-            'troughs': result['onsets'],
-            'dicrotic_notches': result['dicrotic_notches']
-        }
+        return {"peaks": result["peaks"], "troughs": result["onsets"], "dicrotic_notches": result["dicrotic_notches"]}
 
-    elif method == 'prominence':
+    elif method == "prominence":
         peaks, _ = find_peaks(signal, prominence=prominence)
 
         inverted = -signal
         troughs, _ = find_peaks(inverted, prominence=prominence)
 
-        return {
-            'peaks': peaks,
-            'troughs': troughs,
-            'dicrotic_notches': np.array([], dtype=int)
-        }
+        return {"peaks": peaks, "troughs": troughs, "dicrotic_notches": np.array([], dtype=int)}
 
     return {
-        'peaks': np.array([], dtype=int),
-        'troughs': np.array([], dtype=int),
-        'dicrotic_notches': np.array([], dtype=int)
+        "peaks": np.array([], dtype=int),
+        "troughs": np.array([], dtype=int),
+        "dicrotic_notches": np.array([], dtype=int),
     }
 
 
 def calculate_bp_metrics(signal, peaks, troughs, sampling_rate, target_fs=4.0):
     time = np.arange(len(signal)) / sampling_rate
     duration = time[-1]
-    
+
     # New time grid at 4Hz
     time_4hz = np.linspace(0, duration, int(duration * target_fs))
-    
+
     sbp_values = signal[peaks]
     dbp_values = signal[troughs]
-    
+
     # Interpolate to 4Hz grid
     sbp_4hz = np.interp(time_4hz, time[peaks], sbp_values)
     dbp_4hz = np.interp(time_4hz, time[troughs], dbp_values)
-    
+
     # Calculate MAP on the 4Hz grid
     map_4hz = dbp_4hz + (sbp_4hz - dbp_4hz) / 3
-    
+
     return {
-        'time_4hz': time_4hz,
-        'sbp_4hz': sbp_4hz,
-        'dbp_4hz': dbp_4hz,
-        'map_4hz': map_4hz,
-        'mean_sbp': np.mean(sbp_values),
-        'mean_dbp': np.mean(dbp_values),
-        'mean_mbp': np.mean(map_4hz)
+        "time_4hz": time_4hz,
+        "sbp_4hz": sbp_4hz,
+        "dbp_4hz": dbp_4hz,
+        "map_4hz": map_4hz,
+        "mean_sbp": np.mean(sbp_values),
+        "mean_dbp": np.mean(dbp_values),
+        "mean_mbp": np.mean(map_4hz),
     }
 
 
@@ -190,74 +189,73 @@ def process_bp(signal, sampling_rate, params):
         - calibration_artifacts: Calibration artifact regions (if detected)
         - quality_dp: Derivative quality metrics (if detected)
     """
+    signal = np.asarray(signal, dtype=float)
+
     bp_filtered = filter_bp(
         signal,
         sampling_rate,
-        method=params.get('filter_method', 'bessel_25hz'),
-        filter_order=params.get('filter_order', 3),
-        cutoff_freq=params.get('cutoff_freq', 25),
-        filter_type=params.get('filter_type', 'butterworth'),
-        lowcut=params.get('lowcut', 0.5),
-        highcut=params.get('highcut', 15.0),
-        apply_lowcut=params.get('apply_lowcut', True),
-        apply_highcut=params.get('apply_highcut', True)
+        method=params.get("filter_method", "bessel_25hz"),
+        filter_order=params.get("filter_order", 3),
+        cutoff_freq=params.get("cutoff_freq", 25),
+        filter_type=params.get("filter_type", "butterworth"),
+        lowcut=params.get("lowcut", 0.5),
+        highcut=params.get("highcut", 15.0),
+        apply_lowcut=params.get("apply_lowcut", True),
+        apply_highcut=params.get("apply_highcut", True),
     )
 
     peak_result = detect_bp_peaks(
         bp_filtered,
         sampling_rate,
-        method=params.get('peak_method', 'delineator'),
-        prominence=params.get('prominence', 10)
+        method=params.get("peak_method", "delineator"),
+        prominence=params.get("prominence", 10),
     )
 
-    peaks = peak_result['peaks']
-    troughs = peak_result['troughs']
-    dicrotic_notches = peak_result['dicrotic_notches']
+    peaks = peak_result["peaks"]
+    troughs = peak_result["troughs"]
+    dicrotic_notches = peak_result["dicrotic_notches"]
 
     result = {
-        'raw': signal,
-        'filtered': bp_filtered,
-        'dicrotic_notches': dicrotic_notches
+        "raw": signal,
+        "raw_signal": signal,
+        "filtered": bp_filtered,
+        "clean": bp_filtered,
+        "cleaned_signal": bp_filtered,
+        "sampling_rate": sampling_rate,
+        "params": params.copy(),
+        "dicrotic_notches": dicrotic_notches,
     }
 
-    if params.get('detect_calibration', True):
+    if params.get("detect_calibration", True):
         calib_result = detect_calibration_artifacts(
             signal,
             sampling_rate,
-            thr_norm=params.get('calibration_threshold', 1),
-            min_dur_s=params.get('calibration_min_duration', 1.0),
-            pad_s=params.get('calibration_padding', 20)
+            thr_norm=params.get("calibration_threshold", 1),
+            min_dur_s=params.get("calibration_min_duration", 1.0),
+            pad_s=params.get("calibration_padding", 20),
         )
-        result['calibration_artifacts'] = calib_result
-        result['quality_dp'] = calib_result['dp_plot']
+        result["calibration_artifacts"] = calib_result
+        result["quality_dp"] = calib_result["dp_plot"]
 
-        peaks = filter_indices_outside_regions(
-            peaks,
-            calib_result['starts'],
-            calib_result['ends']
-        )
-        troughs = filter_indices_outside_regions(
-            troughs,
-            calib_result['starts'],
-            calib_result['ends']
-        )
+        peaks = filter_indices_outside_regions(peaks, calib_result["starts"], calib_result["ends"])
+        troughs = filter_indices_outside_regions(troughs, calib_result["starts"], calib_result["ends"])
     else:
-        result['calibration_artifacts'] = None
-        result['quality_dp'] = np.array([])
+        result["calibration_artifacts"] = None
+        result["quality_dp"] = np.array([])
 
     if len(peaks) < 2 or len(troughs) < 2:
         return None
 
-    result['auto_peaks'] = peaks.copy()
-    result['current_peaks'] = peaks.copy()
-    result['auto_troughs'] = troughs.copy()
-    result['current_troughs'] = troughs.copy()
-    result['peaks_times'] = peaks / sampling_rate
-    result['troughs_times'] = troughs / sampling_rate
-    result['n_peaks'] = len(peaks)
-    result['n_troughs'] = len(troughs)
+    result["auto_peaks"] = peaks.copy()
+    result["current_peaks"] = peaks.copy()
+    result["auto_troughs"] = troughs.copy()
+    result["current_troughs"] = troughs.copy()
+    result["peaks_times"] = peaks / sampling_rate
+    result["troughs_times"] = troughs / sampling_rate
+    result["n_peaks"] = len(peaks)
+    result["n_troughs"] = len(troughs)
 
-    bp_metrics = calculate_bp_metrics(bp_filtered, peaks, troughs,sampling_rate)
+    bp_metrics = calculate_bp_metrics(bp_filtered, peaks, troughs, sampling_rate)
     result.update(bp_metrics)
 
     return result

@@ -53,6 +53,7 @@ SIGNAL_PATTERNS = {
     'bp': ['bp', 'blood_pressure', 'arterial_pressure', 'abp', 'art', 'a10' ],
     'etco2': ['co2(mmhg)', 'co2', 'etco2', 'end_tidal_co2', 'carbon_dioxide'],
     'eto2': ['o2(mmhg)', 'o2', 'eto2', 'end_tidal_o2', 'oxygen'],
+    'doppler': ['doppler','a5']
 }
 
 # =============================================================================

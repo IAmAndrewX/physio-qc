@@ -153,3 +153,45 @@ def convert_gas_channels(df, co2_channel=None, o2_channel=None):
         conversions['o2'] = 'O2(mmHg)'
 
     return df, conversions
+
+
+def convert_doppler_channel(df, doppler_channel=None):
+    """
+    Detect Doppler channel (e.g. Biopac A6) and create a standardized Doppler column
+
+    This function looks for a Doppler channel by name (default: 'A 6' or 'A6'),
+    and copies it into a new column called 'Doppler', which will then be
+    detected by SIGNAL_PATTERNS.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame containing physiological data channels
+    doppler_channel : str, optional
+        Name of the Doppler channel. If None, will attempt to auto-detect
+        from channel names containing 'A 6' or 'A6'
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with additional 'Doppler' column if detected
+    dict
+        Mapping of converted channels: {'doppler': 'Doppler'}
+    """
+    df = df.copy()
+    conversions = {}
+
+    # Auto-detect Doppler channel if not specified
+    if doppler_channel is None:
+        for col in df.columns:
+            col_lower = col.lower()
+            if 'a 6' in col_lower or 'a6' in col_lower:
+                doppler_channel = col
+                break
+
+    # Create standardized Doppler column
+    if doppler_channel and doppler_channel in df.columns:
+        df['Doppler'] = df[doppler_channel]
+        conversions['doppler'] = 'Doppler'
+
+    return df, conversions

@@ -11,7 +11,7 @@ from plotly.subplots import make_subplots
 
 import config
 from utils.file_io import scan_data_directory, find_file_path, load_acq_file
-from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2
+from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2, doppler
 from utils import peak_editing, export
 
 
@@ -129,6 +129,17 @@ def init_session_state():
     if 'spirometer_params' not in st.session_state:
         st.session_state.spirometer_params = config.DEFAULT_RSP_PARAMS.copy()
 
+    if 'doppler_result' not in st.session_state:
+        st.session_state.doppler_result = None
+
+    if 'doppler_params' not in st.session_state:
+        # simplest: start from BP defaults (or make DEFAULT_DOPPLER_PARAMS in config)
+        st.session_state.doppler_params = config.DEFAULT_BP_PARAMS.copy()
+    if 'doppler_zoom_range' not in st.session_state:
+        st.session_state.doppler_zoom_range = None
+
+
+
 
 def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name, sampling_rate,
                        hr_interpolated=None, hr_bpm=None, quality_continuous=None,
@@ -194,14 +205,18 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     """Create 3 or 4-panel plot for RSP/BP with synchronized zooming"""
     
     # 1. Row Configuration
-    n_rows = 4 if signal_name == 'BP' else 3
+    is_bp_like = signal_name in ('BP', 'DOPPLER')  # <-- add Doppler here
+
+    n_rows = 4 if is_bp_like else 3
     height = 1000 if n_rows == 4 else 800
-    
+
     titles = ['Raw vs Filtered', 'Signal with Peaks/Troughs']
-    if signal_name == 'BP':
-        titles.extend(['BP Metrics (SBP/MAP/DBP)', 'Heart Rate (from BP)'])
+    if is_bp_like:
+        # keep layout identical; you can rename titles later if you want
+        titles.extend(['Metrics (Peak/Mean/Trough)', 'Heart Rate (from peaks)'])
     else:
         titles.append(f'{signal_name} Rate')
+
 
     fig = make_subplots(
         rows=n_rows, cols=1,
@@ -225,7 +240,7 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
                                  name='Diastolic/Exhale', marker=dict(color='#4444FF', size=8)), row=2, col=1)
 
     # --- Row 3: BP Metrics (SBP/MAP/DBP) or RSP Rate ---
-    if signal_name == 'BP' and bp_data is not None:
+    if is_bp_like and bp_data is not None:
         t_4hz = bp_data['time_4hz']
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
@@ -234,7 +249,7 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
         fig.add_trace(go.Scatter(x=time, y=rate_interpolated, name='Rate Interpolated', line=dict(color='#FF6B6B', width=2)), row=3, col=1)
 
     # --- Row 4: Heart Rate (BP only) ---
-    if signal_name == 'BP' and hr_data is not None:
+    if is_bp_like and hr_data is not None:
         fig.add_trace(go.Scatter(x=time, y=hr_data['hr_interpolated'], name='HR from BP', line=dict(color='#FF6B6B', width=2)), row=4, col=1)
 
     # Formatting
@@ -642,6 +657,8 @@ def main():
         tabs.append("ETO2")
     if 'spo2' in detected_signals:
         tabs.append("SpO2")
+    if 'doppler' in detected_signals:
+        tabs.append("Doppler")
     if session_a_selected:
         tabs.append("Spirometry")
     tabs.append("Export")
@@ -2256,6 +2273,138 @@ def main():
 
         tab_idx += 1
 
+
+
+    if 'doppler' in detected_signals:
+        with tab_objects[tab_idx]:
+            st.header("Doppler Processing")
+
+            col1, col2 = st.columns([2, 1])
+
+            with col1:
+                filter_method = st.selectbox("Filter Method", config.BP_FILTER_METHODS, key='doppler_filter')
+                with st.expander("ℹ️ Filter Info"):
+                    st.info(config.BP_FILTER_INFO.get(filter_method, "No info available"))
+
+                peak_method = st.selectbox("Peak Detection", config.BP_PEAK_METHODS, key='doppler_peak')
+                with st.expander("ℹ️ Peak Method Info"):
+                    st.info(config.BP_PEAK_INFO.get(peak_method, "No info available"))
+
+            with col2:
+                # Removed: Detect Calibration Artifacts checkbox and any calibration logic
+
+                if peak_method == 'prominence':
+                    prominence = st.number_input("Prominence", min_value=1, max_value=100, value=10, key='doppler_prom')
+                else:
+                    prominence = 10
+
+            if st.button("Process Doppler", type="primary"):
+                signal = data['df'][data['signal_mappings']['doppler']].values
+
+                params = {
+                    'filter_method': filter_method,
+                    'peak_method': peak_method,
+                    'prominence': prominence,
+                    # Removed: 'detect_calibration'
+                }
+                st.session_state.doppler_params.update(params)
+
+                # NOTE: you need to implement this in metrics/doppler (or wherever you prefer)
+                # using BP logic with small modifications.
+                result = doppler.process_doppler(signal, sampling_rate, st.session_state.doppler_params)
+
+                if result is None:
+                    st.error("Processing failed: insufficient peaks detected")
+                else:
+                    st.session_state.doppler_result = result
+                    st.success("Doppler processed successfully")
+
+            if st.session_state.doppler_result is not None:
+                result = st.session_state.doppler_result
+
+                st.subheader("Manual Doppler Editing")
+
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Auto Peaks", len(result['auto_peaks']))
+                with col2:
+                    st.metric("Auto Troughs", len(result['auto_troughs']))
+                with col3:
+                    n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
+                    st.metric("Added Peaks", n_added_peaks)
+                with col4:
+                    n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
+                    st.metric("Added Troughs", n_added_troughs)
+
+                time = np.arange(len(result['filtered'])) / sampling_rate
+
+                # --- 1. Calculate Aligned 4Hz Doppler Metrics & Derived HR ---
+                # Keep HR-from-peaks identical to BP.
+                from metrics.ecg import calculate_hr
+
+                # Create a doppler metric function analogous to calculate_bp_metrics.
+                # If you truly want "same as BP", you can implement calculate_doppler_metrics
+                # by copying calculate_bp_metrics and renaming outputs.
+                from metrics.doppler import calculate_doppler_metrics
+
+                doppler_data_4hz = calculate_doppler_metrics(
+                    result['filtered'],
+                    result['current_peaks'],
+                    result['current_troughs'],
+                    sampling_rate
+                )
+
+                hr_from_doppler = calculate_hr(
+                    result['current_peaks'],
+                    sampling_rate,
+                    len(result['filtered']),
+                    rate_method=st.session_state.doppler_params.get('rate_method', 'monotone_cubic')
+                )
+
+                # Zoom initialization
+                if 'doppler_region_start' not in st.session_state:
+                    st.session_state.doppler_region_start = 0.0
+                if 'doppler_region_end' not in st.session_state:
+                    st.session_state.doppler_region_end = min(10.0, float(time[-1]))
+
+                doppler_zoom = (st.session_state.doppler_region_start, st.session_state.doppler_region_end)
+
+                # --- 2. Generate Figure ---
+                fig = create_rsp_bp_plot(
+                    time, result['raw'], result['filtered'],
+                    result['current_peaks'], result['current_troughs'],
+                    result['auto_peaks'], result['auto_troughs'],
+                    'DOPPLER',
+                    bp_data=doppler_data_4hz,      # reuse the same argument name to keep layout identical
+                    hr_data=hr_from_doppler,
+                    ui_revision='doppler_plot',
+                    zoom_range=doppler_zoom
+                )
+
+                # Removed: Calibration Artifact Sidebar Info block
+
+                st.plotly_chart(fig, use_container_width=True)
+
+                # --- 3. Statistics Section ---
+                st.subheader("Statistics")
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Final Cycles", min(len(result['current_peaks']), len(result['current_troughs'])))
+                with col2:
+                    st.metric("Mean Peak", f"{doppler_data_4hz['mean_peak']:.3f}")
+                with col3:
+                    st.metric("Mean Trough", f"{doppler_data_4hz['mean_trough']:.3f}")
+                with col4:
+                    st.metric("Mean Amplitude", f"{doppler_data_4hz['mean_amp']:.3f}")
+
+        tab_idx += 1
+
+
+
+
+
+
+
     # --- SPIROMETRY TAB (Session A) ---
     if session_a_selected:
         with tab_objects[tab_idx]:
@@ -2267,6 +2416,8 @@ def main():
             )
 
         tab_idx += 1
+
+
 
     # --- EXPORT TAB ---
     with tab_objects[-1]:

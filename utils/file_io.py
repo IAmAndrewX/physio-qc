@@ -9,7 +9,7 @@ import pandas as pd
 import bioread
 
 import config
-from utils.conversions import convert_gas_channels
+from utils.conversions import convert_gas_channels, convert_doppler_channel
 from utils.pmu_integration import (
     extract_pmu_task_signals,
     resample_signal_to_length,
@@ -229,6 +229,7 @@ def load_acq_file(file_path, participant=None, session=None, task=None):
 
     # Apply gas channel conversions (voltage to mmHg for CO2/O2)
     df_raw, gas_conversions = convert_gas_channels(df_raw)
+    df_raw, doppler_conversions = convert_doppler_channel(df_raw)
 
     signal_mappings = {}
     for col in df_raw.columns:
@@ -248,6 +249,8 @@ def load_acq_file(file_path, participant=None, session=None, task=None):
         signal_mappings['etco2'] = gas_conversions['co2']
     if 'o2' in gas_conversions:
         signal_mappings['eto2'] = gas_conversions['o2']
+    if 'doppler' in doppler_conversions:
+        signal_mappings['doppler'] = doppler_conversions['doppler']
 
     # Session B: inject Siemens PMU pulse/respiration as PPG/RSP channels.
     df_raw, signal_mappings, pmu_status = _attach_pmu_session_b_signals(

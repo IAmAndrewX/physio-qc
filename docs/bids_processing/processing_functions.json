@@ -1,0 +1,42 @@
+{
+  "Description": "Processing function inventory for Physio QC. BIDS-style tabular sidecar for docs/bids_processing/processing_functions.tsv.",
+  "metric": {
+    "Description": "Signal metric or modality.",
+    "Levels": {
+      "ecg": "Electrocardiogram",
+      "rsp": "Respiration belt",
+      "ppg": "Photoplethysmography",
+      "bp": "Blood pressure",
+      "etco2": "End-tidal CO2",
+      "eto2": "End-tidal O2",
+      "spo2": "Pulse oximetry saturation"
+    }
+  },
+  "stage": {
+    "Description": "Pipeline stage for the function (cleaning, detection, rate, quality, metrics, pipeline)."
+  },
+  "function": {
+    "Description": "Function name(s) implemented in the codebase."
+  },
+  "module": {
+    "Description": "Source module path in the repository."
+  },
+  "primary_library": {
+    "Description": "Primary numerical/physiology library used by that function."
+  },
+  "default_method": {
+    "Description": "Default method setting as implemented by defaults in config and/or function signature."
+  },
+  "params_keys": {
+    "Description": "Primary parameter keys consumed by that function/pipeline. Multiple keys are pipe-delimited."
+  },
+  "neurokit2_usage": {
+    "Description": "How NeuroKit2 is used in that function."
+  },
+  "powerline_60_usage": {
+    "Description": "Whether explicit 60 Hz powerline filtering is applied."
+  },
+  "notes": {
+    "Description": "Implementation notes for consistency and caveats."
+  }
+}

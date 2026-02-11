@@ -3,15 +3,21 @@ PPG (Photoplethysmography) signal processing functions
 Pure functions with no classes
 """
 
-import numpy as np
 import neurokit2 as nk
+import numpy as np
 
-import config
 
-
-def clean_ppg(signal, sampling_rate, method='elgendi',
-              lowcut=0.5, highcut=8.0, filter_type='butterworth',
-              filter_order=5, apply_lowcut=True, apply_highcut=True):
+def clean_ppg(
+    signal,
+    sampling_rate,
+    method="elgendi",
+    lowcut=0.5,
+    highcut=8.0,
+    filter_type="butterworth",
+    filter_order=5,
+    apply_lowcut=True,
+    apply_highcut=True,
+):
     """
     Clean PPG signal using NeuroKit2 methods or custom filtering
 
@@ -41,32 +47,23 @@ def clean_ppg(signal, sampling_rate, method='elgendi',
     array
         Cleaned PPG signal
     """
-    if method == 'custom':
+    if method == "custom":
         ppg_clean = signal.copy()
         low = lowcut if apply_lowcut else None
         high = highcut if apply_highcut else None
         if (low is not None and low > 0) or (high is not None and high < sampling_rate / 2):
             ppg_clean = nk.signal_filter(
-                ppg_clean,
-                sampling_rate=sampling_rate,
-                lowcut=low,
-                highcut=high,
-                method=filter_type,
-                order=filter_order
+                ppg_clean, sampling_rate=sampling_rate, lowcut=low, highcut=high, method=filter_type, order=filter_order
             )
-    elif method == 'none':
+    elif method == "none":
         ppg_clean = signal.copy()
     else:
-        ppg_clean = nk.ppg_clean(
-            signal,
-            sampling_rate=sampling_rate,
-            method=method
-        )
+        ppg_clean = nk.ppg_clean(signal, sampling_rate=sampling_rate, method=method)
 
     return ppg_clean
 
 
-def detect_ppg_peaks(signal, sampling_rate, method='elgendi', correct_artifacts=False):
+def detect_ppg_peaks(signal, sampling_rate, method="elgendi", correct_artifacts=False):
     """
     Detect systolic peaks in PPG signal
 
@@ -87,12 +84,9 @@ def detect_ppg_peaks(signal, sampling_rate, method='elgendi', correct_artifacts=
         PPG peak sample indices
     """
     _, peaks_info = nk.ppg_peaks(
-        signal,
-        sampling_rate=sampling_rate,
-        method=method,
-        correct_artifacts=correct_artifacts
+        signal, sampling_rate=sampling_rate, method=method, correct_artifacts=correct_artifacts
     )
-    ppg_peaks = peaks_info['PPG_Peaks']
+    ppg_peaks = peaks_info["PPG_Peaks"]
 
     return ppg_peaks
 
@@ -117,13 +111,10 @@ def calculate_ppg_quality(signal, sampling_rate):
     """
     quality = nk.ppg_quality(signal, sampling_rate=sampling_rate)
 
-    return {
-        'quality': quality,
-        'quality_mean': np.nanmean(quality)
-    }
+    return {"quality": quality, "quality_mean": np.nanmean(quality)}
 
 
-def calculate_hr_from_ppg(ppg_peaks, sampling_rate, signal_length, rate_method='monotone_cubic'):
+def calculate_hr_from_ppg(ppg_peaks, sampling_rate, signal_length, rate_method="monotone_cubic"):
     """
     Calculate heart rate from PPG peaks
 
@@ -151,17 +142,14 @@ def calculate_hr_from_ppg(ppg_peaks, sampling_rate, signal_length, rate_method='
     hr_bpm = 60 / peak_intervals
 
     hr_interpolated = nk.signal_rate(
-        ppg_peaks,
-        sampling_rate=sampling_rate,
-        desired_length=signal_length,
-        interpolation_method=rate_method
+        ppg_peaks, sampling_rate=sampling_rate, desired_length=signal_length, interpolation_method=rate_method
     )
 
     return {
-        'hr_bpm': hr_bpm,
-        'hr_interpolated': hr_interpolated,
-        'mean_hr': np.nanmean(hr_bpm),
-        'std_hr': np.nanstd(hr_bpm)
+        "hr_bpm": hr_bpm,
+        "hr_interpolated": hr_interpolated,
+        "mean_hr": np.nanmean(hr_bpm),
+        "std_hr": np.nanstd(hr_bpm),
     }
 
 
@@ -195,44 +183,49 @@ def process_ppg(signal, sampling_rate, params):
         - n_peaks: Number of peaks
         - mean_hr, std_hr: Statistics
     """
+    signal = np.asarray(signal, dtype=float)
+
+    cleaning_method = params.get("cleaning_method", params.get("method", "elgendi"))
+
     ppg_clean = clean_ppg(
         signal,
         sampling_rate,
-        method=params.get('method', 'elgendi'),
-        lowcut=params.get('lowcut', 0.5),
-        highcut=params.get('highcut', 8.0),
-        filter_type=params.get('filter_type', 'butterworth'),
-        filter_order=params.get('filter_order', 5),
-        apply_lowcut=params.get('apply_lowcut', True),
-        apply_highcut=params.get('apply_highcut', True)
+        method=cleaning_method,
+        lowcut=params.get("lowcut", 0.5),
+        highcut=params.get("highcut", 8.0),
+        filter_type=params.get("filter_type", "butterworth"),
+        filter_order=params.get("filter_order", 5),
+        apply_lowcut=params.get("apply_lowcut", True),
+        apply_highcut=params.get("apply_highcut", True),
     )
 
     ppg_peaks = detect_ppg_peaks(
         ppg_clean,
         sampling_rate,
-        method=params.get('peak_method', 'elgendi'),
-        correct_artifacts=params.get('correct_artifacts', False)
+        method=params.get("peak_method", "elgendi"),
+        correct_artifacts=params.get("correct_artifacts", False),
     )
 
     if len(ppg_peaks) < 2:
         return None
 
     hr_result = calculate_hr_from_ppg(
-        ppg_peaks,
-        sampling_rate,
-        len(ppg_clean),
-        rate_method=params.get('rate_method', 'monotone_cubic')
+        ppg_peaks, sampling_rate, len(ppg_clean), rate_method=params.get("rate_method", "monotone_cubic")
     )
 
     quality_result = calculate_ppg_quality(ppg_clean, sampling_rate)
 
     result = {
-        'raw': signal,
-        'clean': ppg_clean,
-        'auto_peaks': ppg_peaks.copy(),
-        'current_peaks': ppg_peaks.copy(),
-        'peaks_times': ppg_peaks / sampling_rate,
-        'n_peaks': len(ppg_peaks)
+        "raw": signal,
+        "clean": ppg_clean,
+        "raw_signal": signal,
+        "cleaned_signal": ppg_clean,
+        "auto_peaks": ppg_peaks.copy(),
+        "current_peaks": ppg_peaks.copy(),
+        "peaks_times": ppg_peaks / sampling_rate,
+        "sampling_rate": sampling_rate,
+        "params": params.copy(),
+        "n_peaks": len(ppg_peaks),
     }
 
     result.update(hr_result)

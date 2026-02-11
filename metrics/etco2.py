@@ -11,9 +11,10 @@ Functions:
     extract_etco2_envelope: Main processing function to create ETCO2 trace
 """
 
+from typing import Dict, Optional
+
 import numpy as np
-from scipy.signal import find_peaks, medfilt, savgol_filter, peak_prominences
-from typing import Dict, Tuple, Optional
+from scipy.signal import find_peaks, medfilt, peak_prominences, savgol_filter
 
 
 def _nearest_odd(n: int) -> int:
@@ -28,7 +29,7 @@ def detect_peaks_diff(
     min_prominence: float = 1.0,
     sg_window_s: float = 0.3,
     sg_poly: int = 2,
-    prom_adapt: bool = False
+    prom_adapt: bool = False,
 ) -> np.ndarray:
     """
     Detect CO2 peaks using derivative zero-crossings with curvature filtering.
@@ -143,10 +144,7 @@ def detect_peaks_diff(
 
 
 def detect_peaks_prominence(
-    signal: np.ndarray,
-    sampling_rate: float,
-    min_peak_distance_s: float = 2.0,
-    min_prominence: float = 1.0
+    signal: np.ndarray, sampling_rate: float, min_peak_distance_s: float = 2.0, min_prominence: float = 1.0
 ) -> np.ndarray:
     """
     Detect CO2 peaks using scipy's prominence-based peak detection.
@@ -171,19 +169,11 @@ def detect_peaks_prominence(
         Array of peak indices in the signal
     """
     min_dist_samples = int(min_peak_distance_s * sampling_rate)
-    peaks_idx, _ = find_peaks(
-        signal,
-        prominence=min_prominence,
-        distance=min_dist_samples
-    )
+    peaks_idx, _ = find_peaks(signal, prominence=min_prominence, distance=min_dist_samples)
     return peaks_idx
 
 
-def extract_etco2_envelope(
-    signal: np.ndarray,
-    sampling_rate: float,
-    params: Optional[Dict] = None
-) -> Dict:
+def extract_etco2_envelope(signal: np.ndarray, sampling_rate: float, params: Optional[Dict] = None) -> Dict:
     """
     Extract end-tidal CO2 envelope from continuous CO2 recording.
 
@@ -225,20 +215,20 @@ def extract_etco2_envelope(
         params = {}
 
     # Default parameters
-    peak_method = params.get('peak_method', 'diff')
-    min_peak_distance_s = params.get('min_peak_distance_s', 2.0)
-    min_prominence = params.get('min_prominence', 1.0)
-    sg_window_s = params.get('sg_window_s', 0.3)
-    sg_poly = params.get('sg_poly', 2)
-    prom_adapt = params.get('prom_adapt', False)
-    smooth_peaks = params.get('smooth_peaks', 5)
+    peak_method = params.get("peak_method", "diff")
+    min_peak_distance_s = params.get("min_peak_distance_s", 2.0)
+    min_prominence = params.get("min_prominence", 1.0)
+    sg_window_s = params.get("sg_window_s", 0.3)
+    sg_poly = params.get("sg_poly", 2)
+    prom_adapt = params.get("prom_adapt", False)
+    smooth_peaks = params.get("smooth_peaks", 5)
 
     # Ensure smooth_peaks is odd
     if smooth_peaks % 2 == 0:
         smooth_peaks += 1
 
     # Detect peaks
-    if peak_method == 'diff':
+    if peak_method == "diff":
         peaks_idx = detect_peaks_diff(
             signal,
             sampling_rate,
@@ -246,23 +236,17 @@ def extract_etco2_envelope(
             min_prominence=min_prominence,
             sg_window_s=sg_window_s,
             sg_poly=sg_poly,
-            prom_adapt=prom_adapt
+            prom_adapt=prom_adapt,
         )
 
         # Fallback to prominence if derivative method fails
         if peaks_idx.size == 0:
             peaks_idx = detect_peaks_prominence(
-                signal,
-                sampling_rate,
-                min_peak_distance_s=min_peak_distance_s,
-                min_prominence=min_prominence
+                signal, sampling_rate, min_peak_distance_s=min_peak_distance_s, min_prominence=min_prominence
             )
     else:
         peaks_idx = detect_peaks_prominence(
-            signal,
-            sampling_rate,
-            min_peak_distance_s=min_peak_distance_s,
-            min_prominence=min_prominence
+            signal, sampling_rate, min_peak_distance_s=min_peak_distance_s, min_prominence=min_prominence
         )
 
     # Create time vector
@@ -281,11 +265,7 @@ def extract_etco2_envelope(
 
     # Create envelope by interpolation
     if peaks_idx.size >= 2:
-        envelope = np.interp(
-            time_vector,
-            time_vector[peaks_idx],
-            smoothed_peak_values
-        )
+        envelope = np.interp(time_vector, time_vector[peaks_idx], smoothed_peak_values)
     elif peaks_idx.size == 1:
         # Single peak: flat line at peak value
         envelope = np.full_like(time_vector, smoothed_peak_values[0], dtype=float)
@@ -293,22 +273,28 @@ def extract_etco2_envelope(
         # No peaks: fallback to smoothed signal
         try:
             win_pts = _nearest_odd(max(5, int(round(sg_window_s * sampling_rate))))
-            envelope = savgol_filter(
-                signal,
-                window_length=win_pts,
-                polyorder=max(1, sg_poly)
-            )
+            envelope = savgol_filter(signal, window_length=win_pts, polyorder=max(1, sg_poly))
         except Exception:
             envelope = signal.astype(float)
 
-    return {
-        'raw_signal': signal,
-        'auto_peaks': peaks_idx.copy(),
-        'current_peaks': peaks_idx.copy(),
-        'etco2_envelope': envelope,
-        'peak_values': peak_values,
-        'smoothed_peak_values': smoothed_peak_values,
-        'time_vector': time_vector,
-        'sampling_rate': sampling_rate,
-        'params': params.copy()
+    result = {
+        "raw_signal": signal,
+        "auto_peaks": peaks_idx.copy(),
+        "current_peaks": peaks_idx.copy(),
+        "etco2_envelope": envelope,
+        "peak_values": peak_values,
+        "smoothed_peak_values": smoothed_peak_values,
+        "time_vector": time_vector,
+        "sampling_rate": sampling_rate,
+        "params": params.copy(),
     }
+    # Backward/forward compatibility aliases for cross-metric consistency
+    result["raw"] = result["raw_signal"]
+    result["clean"] = result["etco2_envelope"]
+    result["cleaned_signal"] = result["etco2_envelope"]
+    return result
+
+
+def process_etco2(signal: np.ndarray, sampling_rate: float, params: Optional[Dict] = None) -> Dict:
+    """Wrapper to standardize per-metric entry-point naming."""
+    return extract_etco2_envelope(signal=signal, sampling_rate=sampling_rate, params=params)

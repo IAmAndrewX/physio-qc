@@ -1,0 +1,25 @@
+metric	stage	function	module	primary_library	default_method	params_keys	neurokit2_usage	powerline_60_usage	notes
+ecg	cleaning	clean_ecg	metrics/ecg.py	neurokit2	neurokit	cleaning_method|method|powerline|lowcut|highcut|filter_type|filter_order|apply_lowcut|apply_highcut	nk.ecg_clean or nk.signal_filter	Yes (default=60; applied in neurokit and custom branches)	Custom branch now applies NK powerline filter for consistency.
+ecg	peak_detection	detect_r_peaks	metrics/ecg.py	neurokit2	neurokit	peak_method|correct_artifacts	nk.ecg_peaks	N/A	Returns R-peak indices.
+ecg	rate	calculate_hr	metrics/ecg.py	neurokit2	monotone_cubic	rate_method	nk.ecg_rate	N/A	Computes beat-to-beat and interpolated HR.
+ecg	pipeline	process_ecg	metrics/ecg.py	neurokit2	neurokit	all above	Composes NK-backed cleaning/detection/rate	ECG only	Standardized aliases: raw_signal, cleaned_signal, auto_peaks/current_peaks.
+rsp	cleaning	clean_rsp	metrics/rsp.py	neurokit2	khodadad2018	cleaning_method|method|lowcut|highcut|filter_type|filter_order|apply_lowcut|apply_highcut	nk.rsp_clean or nk.signal_filter	No	No explicit powerline stage (not needed for respiration band).
+rsp	peak_detection	detect_breath_peaks	metrics/rsp.py	neurokit2+numpy	scipy	peak_method|amplitude_method	nk.rsp_peaks	No	Amplitude normalization options: robust|standardize|minmax|none.
+rsp	rate	calculate_breathing_rate	metrics/rsp.py	neurokit2	monotone_cubic	rate_method	nk.signal_rate	No	Uses trough-to-trough intervals.
+rsp	pipeline	process_rsp	metrics/rsp.py	neurokit2	khodadad2018	all above	Composes NK-backed cleaning/peaks/rate	No	Standardized aliases: raw_signal, cleaned_signal.
+ppg	cleaning	clean_ppg	metrics/ppg.py	neurokit2	elgendi	cleaning_method|method|lowcut|highcut|filter_type|filter_order|apply_lowcut|apply_highcut	nk.ppg_clean or nk.signal_filter	No	Method none is pass-through.
+ppg	peak_detection	detect_ppg_peaks	metrics/ppg.py	neurokit2	elgendi	peak_method|correct_artifacts	nk.ppg_peaks	No	Returns systolic peaks.
+ppg	quality	calculate_ppg_quality	metrics/ppg.py	neurokit2	default	(none)	nk.ppg_quality	No	Per-sample quality + mean.
+ppg	rate	calculate_hr_from_ppg	metrics/ppg.py	neurokit2	monotone_cubic	rate_method	nk.signal_rate	No	Pulse-rate from inter-peak intervals.
+ppg	pipeline	process_ppg	metrics/ppg.py	neurokit2	elgendi	all above	Composes NK-backed cleaning/peaks/rate/quality	No	Standardized aliases: raw_signal, cleaned_signal.
+bp	cleaning	filter_bp	metrics/blood_pressure.py	scipy+neurokit2	bessel_25hz	filter_method|filter_order|cutoff_freq|filter_type|lowcut|highcut|apply_lowcut|apply_highcut	NK only for custom mode (nk.signal_filter)	No	Default clinical path remains scipy Bessel/Butterworth to match delineation behavior.
+bp	peak_detection	detect_bp_peaks	metrics/blood_pressure.py	custom+scipy	delineator	peak_method|prominence	No NK in delineator/prominence paths	No	Delineator from algorithms/bp_delineator.py.
+bp	metrics	calculate_bp_metrics	metrics/blood_pressure.py	numpy	4Hz interpolation	(target_fs fixed)	No	No	Interpolates SBP/DBP and derives MAP.
+bp	pipeline	process_bp	metrics/blood_pressure.py	mixed	delineator	all above + calibration params	Combines scipy/custom methods + artifact gating	No	Added standardized aliases: clean/cleaned_signal/raw_signal.
+etco2	peak_detection	detect_peaks_diff|detect_peaks_prominence	metrics/etco2.py	scipy	 diff	peak_method|min_peak_distance_s|min_prominence|sg_window_s|sg_poly|prom_adapt	No NK equivalent used	No	Derivative and prominence paths with fallback.
+etco2	pipeline	extract_etco2_envelope|process_etco2	metrics/etco2.py	scipy	diff	peak_method|min_peak_distance_s|min_prominence|smooth_peaks|sg_window_s|sg_poly|prom_adapt	No NK equivalent used	No	process_etco2 added for naming consistency.
+eto2	trough_detection	detect_troughs_diff|detect_troughs_prominence	metrics/eto2.py	scipy	diff	trough_method|min_trough_distance_s|min_prominence|sg_window_s|sg_poly|prom_adapt	No NK equivalent used	No	Derivative and prominence paths with fallback.
+eto2	pipeline	extract_eto2_envelope|process_eto2	metrics/eto2.py	scipy	diff	trough_method|min_trough_distance_s|min_prominence|smooth_troughs|sg_window_s|sg_poly|prom_adapt	No NK equivalent used	No	process_eto2 added for naming consistency.
+spo2	cleaning	clean_spo2	metrics/spo2.py	neurokit2+scipy	lowpass	cleaning_method|lowpass_cutoff|filter_order|sg_window_s|sg_poly	lowpass now uses nk.signal_filter	No	Savitzky-Golay branch uses scipy.
+spo2	event_detection	detect_desaturation_events	metrics/spo2.py	numpy	threshold+drop	desaturation_threshold|desaturation_drop|min_event_duration_s	No	No	min_drop now enforced against local pre-event baseline.
+spo2	pipeline	process_spo2	metrics/spo2.py	mixed	lowpass	all above	Composes NK lowpass/scipy smooth + event metrics	No	Added aliases raw/clean for consistency.

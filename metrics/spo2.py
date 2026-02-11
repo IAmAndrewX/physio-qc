@@ -11,9 +11,11 @@ Functions:
     process_spo2: Main processing function
 """
 
+from typing import Dict, List, Optional, Tuple
+
+import neurokit2 as nk
 import numpy as np
-from scipy.signal import butter, filtfilt, savgol_filter
-from typing import Dict, Optional, List, Tuple
+from scipy.signal import savgol_filter
 
 
 def _nearest_odd(n: int) -> int:
@@ -24,11 +26,11 @@ def _nearest_odd(n: int) -> int:
 def clean_spo2(
     signal: np.ndarray,
     sampling_rate: float,
-    method: str = 'lowpass',
+    method: str = "lowpass",
     lowpass_cutoff: float = 0.5,
     filter_order: int = 2,
     sg_window_s: float = 1.0,
-    sg_poly: int = 2
+    sg_poly: int = 2,
 ) -> np.ndarray:
     """
     Clean SpO2 signal by applying filtering/smoothing.
@@ -55,18 +57,16 @@ def clean_spo2(
     cleaned : np.ndarray
         Cleaned SpO2 signal
     """
-    if method == 'none':
+    if method == "none":
         return signal.copy()
 
-    if method == 'lowpass':
-        # Butterworth lowpass filter
-        nyquist = sampling_rate / 2
-        normalized_cutoff = min(lowpass_cutoff / nyquist, 0.99)
-        b, a = butter(filter_order, normalized_cutoff, btype='low')
-        cleaned = filtfilt(b, a, signal)
-        return cleaned
+    if method == "lowpass":
+        # NeuroKit2-backed low-pass filtering for consistency across modules.
+        return nk.signal_filter(
+            signal, sampling_rate=sampling_rate, highcut=lowpass_cutoff, method="butterworth", order=filter_order
+        )
 
-    if method == 'savgol':
+    if method == "savgol":
         # Savitzky-Golay smoothing
         win_pts = max(5, int(round(sg_window_s * sampling_rate)))
         win_pts = _nearest_odd(win_pts)
@@ -85,14 +85,14 @@ def detect_desaturation_events(
     sampling_rate: float,
     threshold: float = 90.0,
     min_drop: float = 3.0,
-    min_duration_s: float = 10.0
+    min_duration_s: float = 10.0,
 ) -> List[Tuple[int, int, float]]:
     """
     Detect desaturation events in SpO2 signal.
 
-    A desaturation event is defined as a period where SpO2 drops by at least
-    `min_drop` percentage points from a local baseline and stays below
-    `threshold` for at least `min_duration_s` seconds.
+    A desaturation event is defined as a period where SpO2 stays below
+    `threshold` for at least `min_duration_s` seconds and reaches at least
+    `min_drop` percentage points below a local pre-event baseline.
 
     Parameters
     ----------
@@ -113,6 +113,7 @@ def detect_desaturation_events(
         List of (start_idx, end_idx, min_spo2) tuples for each event
     """
     min_samples = int(min_duration_s * sampling_rate)
+    baseline_window_samples = max(1, int(30 * sampling_rate))
     below_threshold = signal < threshold
 
     events = []
@@ -129,7 +130,11 @@ def detect_desaturation_events(
             event_duration = i - event_start
             if event_duration >= min_samples:
                 min_spo2 = np.min(signal[event_start:i])
-                events.append((event_start, i, min_spo2))
+                baseline_start = max(0, event_start - baseline_window_samples)
+                baseline_slice = signal[baseline_start:event_start]
+                baseline = np.median(baseline_slice) if baseline_slice.size > 0 else np.median(signal)
+                if (baseline - min_spo2) >= min_drop:
+                    events.append((event_start, i, min_spo2))
             in_event = False
 
     # Handle event that extends to end of signal
@@ -137,16 +142,16 @@ def detect_desaturation_events(
         event_duration = len(signal) - event_start
         if event_duration >= min_samples:
             min_spo2 = np.min(signal[event_start:])
-            events.append((event_start, len(signal), min_spo2))
+            baseline_start = max(0, event_start - baseline_window_samples)
+            baseline_slice = signal[baseline_start:event_start]
+            baseline = np.median(baseline_slice) if baseline_slice.size > 0 else np.median(signal)
+            if (baseline - min_spo2) >= min_drop:
+                events.append((event_start, len(signal), min_spo2))
 
     return events
 
 
-def calculate_spo2_metrics(
-    signal: np.ndarray,
-    sampling_rate: float,
-    events: List[Tuple[int, int, float]]
-) -> Dict:
+def calculate_spo2_metrics(signal: np.ndarray, sampling_rate: float, events: List[Tuple[int, int, float]]) -> Dict:
     """
     Calculate summary metrics for SpO2 signal.
 
@@ -196,25 +201,21 @@ def calculate_spo2_metrics(
     desaturation_index = n_events / duration_hours if duration_hours > 0 else 0
 
     return {
-        'mean_spo2': mean_spo2,
-        'min_spo2': min_spo2,
-        'max_spo2': max_spo2,
-        'std_spo2': std_spo2,
-        'time_below_90': time_below_90,
-        'time_below_90_pct': time_below_90_pct,
-        'time_below_95': time_below_95,
-        'time_below_95_pct': time_below_95_pct,
-        'n_desaturation_events': n_events,
-        'desaturation_index': desaturation_index,
-        'total_duration': duration_s
+        "mean_spo2": mean_spo2,
+        "min_spo2": min_spo2,
+        "max_spo2": max_spo2,
+        "std_spo2": std_spo2,
+        "time_below_90": time_below_90,
+        "time_below_90_pct": time_below_90_pct,
+        "time_below_95": time_below_95,
+        "time_below_95_pct": time_below_95_pct,
+        "n_desaturation_events": n_events,
+        "desaturation_index": desaturation_index,
+        "total_duration": duration_s,
     }
 
 
-def process_spo2(
-    signal: np.ndarray,
-    sampling_rate: float,
-    params: Optional[Dict] = None
-) -> Dict:
+def process_spo2(signal: np.ndarray, sampling_rate: float, params: Optional[Dict] = None) -> Dict:
     """
     Process SpO2 signal: clean, detect events, calculate metrics.
 
@@ -250,15 +251,17 @@ def process_spo2(
     if params is None:
         params = {}
 
+    signal = np.asarray(signal, dtype=float)
+
     # Extract parameters with defaults
-    cleaning_method = params.get('cleaning_method', 'lowpass')
-    lowpass_cutoff = params.get('lowpass_cutoff', 0.5)
-    filter_order = params.get('filter_order', 2)
-    sg_window_s = params.get('sg_window_s', 1.0)
-    sg_poly = params.get('sg_poly', 2)
-    desaturation_threshold = params.get('desaturation_threshold', 90.0)
-    desaturation_drop = params.get('desaturation_drop', 3.0)
-    min_event_duration_s = params.get('min_event_duration_s', 10.0)
+    cleaning_method = params.get("cleaning_method", "lowpass")
+    lowpass_cutoff = params.get("lowpass_cutoff", 0.5)
+    filter_order = params.get("filter_order", 2)
+    sg_window_s = params.get("sg_window_s", 1.0)
+    sg_poly = params.get("sg_poly", 2)
+    desaturation_threshold = params.get("desaturation_threshold", 90.0)
+    desaturation_drop = params.get("desaturation_drop", 3.0)
+    min_event_duration_s = params.get("min_event_duration_s", 10.0)
 
     # Clean signal
     cleaned = clean_spo2(
@@ -268,7 +271,7 @@ def process_spo2(
         lowpass_cutoff=lowpass_cutoff,
         filter_order=filter_order,
         sg_window_s=sg_window_s,
-        sg_poly=sg_poly
+        sg_poly=sg_poly,
     )
 
     # Clip to valid range (0-100%)
@@ -283,18 +286,21 @@ def process_spo2(
         sampling_rate,
         threshold=desaturation_threshold,
         min_drop=desaturation_drop,
-        min_duration_s=min_event_duration_s
+        min_duration_s=min_event_duration_s,
     )
 
     # Calculate metrics
     metrics = calculate_spo2_metrics(cleaned, sampling_rate, events)
 
-    return {
-        'raw_signal': signal,
-        'cleaned_signal': cleaned,
-        'time_vector': time_vector,
-        'desaturation_events': events,
-        'metrics': metrics,
-        'sampling_rate': sampling_rate,
-        'params': params.copy()
+    result = {
+        "raw_signal": signal,
+        "cleaned_signal": cleaned,
+        "raw": signal,
+        "clean": cleaned,
+        "time_vector": time_vector,
+        "desaturation_events": events,
+        "metrics": metrics,
+        "sampling_rate": sampling_rate,
+        "params": params.copy(),
     }
+    return result

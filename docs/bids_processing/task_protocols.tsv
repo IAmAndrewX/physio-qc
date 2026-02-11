@@ -1,0 +1,29 @@
+task	protocol_variant	participant_scope	onset	duration	condition	gas	flow_lpm	source
+breath	default	all	0	60	Baseline	n/a	n/a	config.TASK_EVENTS
+breath	default	all	60	60	Fast Breathing	n/a	n/a	config.TASK_EVENTS
+breath	default	all	120	60	Baseline	n/a	n/a	config.TASK_EVENTS
+breath	default	all	180	60	Slow Breathing	n/a	n/a	config.TASK_EVENTS
+breath	default	all	240	60	Baseline	n/a	n/a	config.TASK_EVENTS
+breath	default	all	300	60	Fast Breathing	n/a	n/a	config.TASK_EVENTS
+breath	default	all	360	60	Baseline	n/a	n/a	config.TASK_EVENTS
+breath	default	all	420	60	Slow Breathing	n/a	n/a	config.TASK_EVENTS
+breath	default	all	480	60	Baseline	n/a	n/a	config.TASK_EVENTS
+gas	default	all_except_sub-00*	0	60	Air	Air	n/a	config.TASK_EVENTS
+gas	default	all_except_sub-00*	60	120	Hypercapnia	CO2	n/a	config.TASK_EVENTS
+gas	default	all_except_sub-00*	180	120	Air	Air	n/a	config.TASK_EVENTS
+gas	default	all_except_sub-00*	300	180	Hypoxia	Carbogen	n/a	config.TASK_EVENTS
+gas	default	all_except_sub-00*	480	240	Air	Air	n/a	config.TASK_EVENTS
+gas	default	all_except_sub-00*	720	0	Gas Off	Off	n/a	config.TASK_EVENTS
+gas	sub-00_override	sub-00*	0	60	Air	Air	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	60	120	Hypercapnia	CO2	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	180	60	Air	Air	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	240	180	Hypoxia	Carbogen	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	420	180	Air	Air	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	600	120	Hypercapnia	CO2	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	720	60	Air	Air	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	780	180	Hypoxia	Carbogen	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	960	180	Air	Air	25	Operator table (screenshot)
+gas	sub-00_override	sub-00*	1140	0	Gas Off	Off	0	Operator table (screenshot)
+rest	default	all	0	480	Rest	n/a	n/a	config + protocol note
+sts	session_a	session in SPIROMETRY_SESSION_A_ALIASES	0	300	Supine	n/a	n/a	config.TASK_EVENTS
+sts	session_a	session in SPIROMETRY_SESSION_A_ALIASES	300	n/a	Stand	n/a	n/a	config.TASK_EVENTS

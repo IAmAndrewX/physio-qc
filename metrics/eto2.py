@@ -11,9 +11,10 @@ Functions:
     extract_eto2_envelope: Main processing function to create ETO2 trace
 """
 
-import numpy as np
-from scipy.signal import find_peaks, medfilt, savgol_filter, peak_prominences
 from typing import Dict, Optional
+
+import numpy as np
+from scipy.signal import find_peaks, medfilt, peak_prominences, savgol_filter
 
 
 def _nearest_odd(n: int) -> int:
@@ -28,7 +29,7 @@ def detect_troughs_diff(
     min_prominence: float = 1.0,
     sg_window_s: float = 0.2,
     sg_poly: int = 2,
-    prom_adapt: bool = False
+    prom_adapt: bool = False,
 ) -> np.ndarray:
     """
     Detect O2 troughs using derivative zero-crossings with curvature filtering.
@@ -142,10 +143,7 @@ def detect_troughs_diff(
 
 
 def detect_troughs_prominence(
-    signal: np.ndarray,
-    sampling_rate: float,
-    min_trough_distance_s: float = 3.0,
-    min_prominence: float = 1.0
+    signal: np.ndarray, sampling_rate: float, min_trough_distance_s: float = 3.0, min_prominence: float = 1.0
 ) -> np.ndarray:
     """
     Detect O2 troughs using scipy's prominence-based peak detection on inverted signal.
@@ -173,16 +171,12 @@ def detect_troughs_prominence(
     troughs_idx, _ = find_peaks(
         -signal,  # Invert signal to find troughs
         prominence=min_prominence,
-        distance=min_dist_samples
+        distance=min_dist_samples,
     )
     return troughs_idx
 
 
-def extract_eto2_envelope(
-    signal: np.ndarray,
-    sampling_rate: float,
-    params: Optional[Dict] = None
-) -> Dict:
+def extract_eto2_envelope(signal: np.ndarray, sampling_rate: float, params: Optional[Dict] = None) -> Dict:
     """
     Extract end-tidal O2 envelope from continuous O2 recording.
 
@@ -224,20 +218,20 @@ def extract_eto2_envelope(
         params = {}
 
     # Default parameters
-    trough_method = params.get('trough_method', 'diff')
-    min_trough_distance_s = params.get('min_trough_distance_s', 3.0)
-    min_prominence = params.get('min_prominence', 1.0)
-    sg_window_s = params.get('sg_window_s', 0.2)
-    sg_poly = params.get('sg_poly', 2)
-    prom_adapt = params.get('prom_adapt', False)
-    smooth_troughs = params.get('smooth_troughs', 5)
+    trough_method = params.get("trough_method", "diff")
+    min_trough_distance_s = params.get("min_trough_distance_s", 3.0)
+    min_prominence = params.get("min_prominence", 1.0)
+    sg_window_s = params.get("sg_window_s", 0.2)
+    sg_poly = params.get("sg_poly", 2)
+    prom_adapt = params.get("prom_adapt", False)
+    smooth_troughs = params.get("smooth_troughs", 5)
 
     # Ensure smooth_troughs is odd
     if smooth_troughs % 2 == 0:
         smooth_troughs += 1
 
     # Detect troughs
-    if trough_method == 'diff':
+    if trough_method == "diff":
         troughs_idx = detect_troughs_diff(
             signal,
             sampling_rate,
@@ -245,23 +239,17 @@ def extract_eto2_envelope(
             min_prominence=min_prominence,
             sg_window_s=sg_window_s,
             sg_poly=sg_poly,
-            prom_adapt=prom_adapt
+            prom_adapt=prom_adapt,
         )
 
         # Fallback to prominence if derivative method fails
         if troughs_idx.size == 0:
             troughs_idx = detect_troughs_prominence(
-                signal,
-                sampling_rate,
-                min_trough_distance_s=min_trough_distance_s,
-                min_prominence=min_prominence
+                signal, sampling_rate, min_trough_distance_s=min_trough_distance_s, min_prominence=min_prominence
             )
     else:
         troughs_idx = detect_troughs_prominence(
-            signal,
-            sampling_rate,
-            min_trough_distance_s=min_trough_distance_s,
-            min_prominence=min_prominence
+            signal, sampling_rate, min_trough_distance_s=min_trough_distance_s, min_prominence=min_prominence
         )
 
     # Create time vector
@@ -280,11 +268,7 @@ def extract_eto2_envelope(
 
     # Create envelope by interpolation
     if troughs_idx.size >= 2:
-        envelope = np.interp(
-            time_vector,
-            time_vector[troughs_idx],
-            smoothed_trough_values
-        )
+        envelope = np.interp(time_vector, time_vector[troughs_idx], smoothed_trough_values)
     elif troughs_idx.size == 1:
         # Single trough: flat line at trough value
         envelope = np.full_like(time_vector, smoothed_trough_values[0], dtype=float)
@@ -292,22 +276,28 @@ def extract_eto2_envelope(
         # No troughs: fallback to smoothed signal
         try:
             win_pts = _nearest_odd(max(5, int(round(sg_window_s * sampling_rate))))
-            envelope = savgol_filter(
-                signal,
-                window_length=win_pts,
-                polyorder=max(1, sg_poly)
-            )
+            envelope = savgol_filter(signal, window_length=win_pts, polyorder=max(1, sg_poly))
         except Exception:
             envelope = signal.astype(float)
 
-    return {
-        'raw_signal': signal,
-        'auto_troughs': troughs_idx.copy(),
-        'current_troughs': troughs_idx.copy(),
-        'eto2_envelope': envelope,
-        'trough_values': trough_values,
-        'smoothed_trough_values': smoothed_trough_values,
-        'time_vector': time_vector,
-        'sampling_rate': sampling_rate,
-        'params': params.copy()
+    result = {
+        "raw_signal": signal,
+        "auto_troughs": troughs_idx.copy(),
+        "current_troughs": troughs_idx.copy(),
+        "eto2_envelope": envelope,
+        "trough_values": trough_values,
+        "smoothed_trough_values": smoothed_trough_values,
+        "time_vector": time_vector,
+        "sampling_rate": sampling_rate,
+        "params": params.copy(),
     }
+    # Backward/forward compatibility aliases for cross-metric consistency
+    result["raw"] = result["raw_signal"]
+    result["clean"] = result["eto2_envelope"]
+    result["cleaned_signal"] = result["eto2_envelope"]
+    return result
+
+
+def process_eto2(signal: np.ndarray, sampling_rate: float, params: Optional[Dict] = None) -> Dict:
+    """Wrapper to standardize per-metric entry-point naming."""
+    return extract_eto2_envelope(signal=signal, sampling_rate=sampling_rate, params=params)

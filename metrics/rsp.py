@@ -3,15 +3,21 @@ Respiration signal processing functions
 Pure functions with no classes
 """
 
-import numpy as np
 import neurokit2 as nk
+import numpy as np
 
-import config
 
-
-def clean_rsp(signal, sampling_rate, method='khodadad2018',
-              lowcut=0.05, highcut=3.0, filter_type='butterworth',
-              filter_order=5, apply_lowcut=True, apply_highcut=True):
+def clean_rsp(
+    signal,
+    sampling_rate,
+    method="khodadad2018",
+    lowcut=0.05,
+    highcut=3.0,
+    filter_type="butterworth",
+    filter_order=5,
+    apply_lowcut=True,
+    apply_highcut=True,
+):
     """
     Clean respiration signal using NeuroKit2 methods or custom filtering
 
@@ -41,30 +47,21 @@ def clean_rsp(signal, sampling_rate, method='khodadad2018',
     array
         Cleaned respiration signal
     """
-    if method == 'custom':
+    if method == "custom":
         rsp_clean = signal.copy()
         low = lowcut if apply_lowcut else None
         high = highcut if apply_highcut else None
         if (low is not None and low > 0) or (high is not None and high < sampling_rate / 2):
             rsp_clean = nk.signal_filter(
-                rsp_clean,
-                sampling_rate=sampling_rate,
-                lowcut=low,
-                highcut=high,
-                method=filter_type,
-                order=filter_order
+                rsp_clean, sampling_rate=sampling_rate, lowcut=low, highcut=high, method=filter_type, order=filter_order
             )
     else:
-        rsp_clean = nk.rsp_clean(
-            signal,
-            sampling_rate=sampling_rate,
-            method=method
-        )
+        rsp_clean = nk.rsp_clean(signal, sampling_rate=sampling_rate, method=method)
 
     return rsp_clean
 
 
-def detect_breath_peaks(signal, sampling_rate, amplitude_method='robust'):
+def detect_breath_peaks(signal, sampling_rate, amplitude_method="robust", peak_method="scipy"):
     """
     Detect inhalation peaks and exhalation troughs in respiration signal
 
@@ -80,6 +77,11 @@ def detect_breath_peaks(signal, sampling_rate, amplitude_method='robust'):
         - 'standardize': Z-score normalization
         - 'minmax': Min-max normalization to [0, 1]
         - None: No normalization (original behavior)
+    peak_method : str
+        Peak detection method passed to nk.rsp_peaks():
+        - 'scipy': scipy find_peaks (default)
+        - 'khodadad2018': Khodadad et al. (2018) parameters
+        - 'biosppy': BioSPPy resp() parameters
 
     Returns
     -------
@@ -89,7 +91,7 @@ def detect_breath_peaks(signal, sampling_rate, amplitude_method='robust'):
         - troughs: Exhalation trough indices
     """
     # Apply amplitude normalization for better peak detection in low amplitude signals
-    if amplitude_method == 'robust':
+    if amplitude_method == "robust":
         # Robust normalization using median and MAD (Median Absolute Deviation)
         median = np.median(signal)
         mad = np.median(np.abs(signal - median))
@@ -97,7 +99,7 @@ def detect_breath_peaks(signal, sampling_rate, amplitude_method='robust'):
             normalized_signal = (signal - median) / (mad * 1.4826)  # 1.4826 for consistency with std
         else:
             normalized_signal = signal - median
-    elif amplitude_method == 'standardize':
+    elif amplitude_method == "standardize":
         # Z-score normalization
         mean = np.mean(signal)
         std = np.std(signal)
@@ -105,7 +107,7 @@ def detect_breath_peaks(signal, sampling_rate, amplitude_method='robust'):
             normalized_signal = (signal - mean) / std
         else:
             normalized_signal = signal - mean
-    elif amplitude_method == 'minmax':
+    elif amplitude_method == "minmax":
         # Min-max normalization to [0, 1]
         min_val = np.min(signal)
         max_val = np.max(signal)
@@ -117,18 +119,15 @@ def detect_breath_peaks(signal, sampling_rate, amplitude_method='robust'):
         # No normalization
         normalized_signal = signal
 
-    _, peaks_info = nk.rsp_peaks(normalized_signal, sampling_rate=sampling_rate)
+    _, peaks_info = nk.rsp_peaks(normalized_signal, sampling_rate=sampling_rate, method=peak_method)
 
-    peaks = peaks_info['RSP_Peaks']
-    troughs = peaks_info['RSP_Troughs']
+    peaks = peaks_info["RSP_Peaks"]
+    troughs = peaks_info["RSP_Troughs"]
 
-    return {
-        'peaks': peaks,
-        'troughs': troughs
-    }
+    return {"peaks": peaks, "troughs": troughs}
 
 
-def calculate_breathing_rate(troughs, sampling_rate, signal_length, rate_method='monotone_cubic'):
+def calculate_breathing_rate(troughs, sampling_rate, signal_length, rate_method="monotone_cubic"):
     """
     Calculate breathing rate from exhalation troughs
 
@@ -156,17 +155,14 @@ def calculate_breathing_rate(troughs, sampling_rate, signal_length, rate_method=
     br_bpm = 60 / breath_intervals
 
     br_interpolated = nk.signal_rate(
-        troughs,
-        sampling_rate=sampling_rate,
-        desired_length=signal_length,
-        interpolation_method=rate_method
+        troughs, sampling_rate=sampling_rate, desired_length=signal_length, interpolation_method=rate_method
     )
 
     return {
-        'br_bpm': br_bpm,
-        'br_interpolated': br_interpolated,
-        'mean_br': np.nanmean(br_bpm),
-        'std_br': np.nanstd(br_bpm)
+        "br_bpm": br_bpm,
+        "br_interpolated": br_interpolated,
+        "mean_br": np.nanmean(br_bpm),
+        "std_br": np.nanstd(br_bpm),
     }
 
 
@@ -201,46 +197,52 @@ def process_rsp(signal, sampling_rate, params):
         - n_breaths: Number of breaths
         - mean_br, std_br: Statistics
     """
+    signal = np.asarray(signal, dtype=float)
+
+    cleaning_method = params.get("cleaning_method", params.get("method", "khodadad2018"))
+
     rsp_clean = clean_rsp(
         signal,
         sampling_rate,
-        method=params.get('method', 'khodadad2018'),
-        lowcut=params.get('lowcut', 0.05),
-        highcut=params.get('highcut', 3.0),
-        filter_type=params.get('filter_type', 'butterworth'),
-        filter_order=params.get('filter_order', 5),
-        apply_lowcut=params.get('apply_lowcut', True),
-        apply_highcut=params.get('apply_highcut', True)
+        method=cleaning_method,
+        lowcut=params.get("lowcut", 0.05),
+        highcut=params.get("highcut", 3.0),
+        filter_type=params.get("filter_type", "butterworth"),
+        filter_order=params.get("filter_order", 5),
+        apply_lowcut=params.get("apply_lowcut", True),
+        apply_highcut=params.get("apply_highcut", True),
     )
 
     breath_peaks = detect_breath_peaks(
         rsp_clean,
         sampling_rate,
-        amplitude_method=params.get('amplitude_method', 'robust')
+        amplitude_method=params.get("amplitude_method", "robust"),
+        peak_method=params.get("peak_method", "scipy"),
     )
-    peaks = breath_peaks['peaks']
-    troughs = breath_peaks['troughs']
+    peaks = breath_peaks["peaks"]
+    troughs = breath_peaks["troughs"]
 
     if len(troughs) < 2:
         return None
 
     br_result = calculate_breathing_rate(
-        troughs,
-        sampling_rate,
-        len(rsp_clean),
-        rate_method=params.get('rate_method', 'monotone_cubic')
+        troughs, sampling_rate, len(rsp_clean), rate_method=params.get("rate_method", "monotone_cubic")
     )
 
     result = {
-        'raw': signal,
-        'clean': rsp_clean,
-        'auto_peaks': peaks.copy(),
-        'current_peaks': peaks.copy(),
-        'auto_troughs': troughs.copy(),
-        'current_troughs': troughs.copy(),
-        'peaks_times': peaks / sampling_rate,
-        'troughs_times': troughs / sampling_rate,
-        'n_breaths': len(troughs)
+        "raw": signal,
+        "clean": rsp_clean,
+        "raw_signal": signal,
+        "cleaned_signal": rsp_clean,
+        "auto_peaks": peaks.copy(),
+        "current_peaks": peaks.copy(),
+        "auto_troughs": troughs.copy(),
+        "current_troughs": troughs.copy(),
+        "peaks_times": peaks / sampling_rate,
+        "troughs_times": troughs / sampling_rate,
+        "sampling_rate": sampling_rate,
+        "params": params.copy(),
+        "n_breaths": len(troughs),
     }
 
     result.update(br_result)

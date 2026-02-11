@@ -5,6 +5,7 @@
 
 # Local assistant settings
 .claude/
+CLAUDE.md
 
 # Python environments
 .venv/
@@ -28,6 +29,7 @@ dist/
 .ruff_cache/
 .mypy_cache/
 .pytype/
+uv.lock
 .coverage
 .coverage.*
 htmlcov/

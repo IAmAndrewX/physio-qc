@@ -11,6 +11,7 @@ Functions:
     extract_etco2_envelope: Main processing function to create ETCO2 trace
 """
 
+import warnings
 from typing import Dict, Optional
 
 import numpy as np
@@ -128,7 +129,9 @@ def detect_peaks_diff(
 
     # Validate by prominence with optional adaptive threshold
     try:
-        prom, _, _ = peak_prominences(signal, peaks_idx)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="some peaks have a prominence of 0", category=Warning)
+            prom, _, _ = peak_prominences(signal, peaks_idx)
         thr = float(min_prominence)
 
         if prom_adapt and prom.size:

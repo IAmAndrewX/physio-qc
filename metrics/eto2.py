@@ -11,6 +11,7 @@ Functions:
     extract_eto2_envelope: Main processing function to create ETO2 trace
 """
 
+import warnings
 from typing import Dict, Optional
 
 import numpy as np
@@ -127,7 +128,9 @@ def detect_troughs_diff(
 
     # Validate by prominence on inverted signal
     try:
-        prom, _, _ = peak_prominences(-signal, troughs_idx)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="some peaks have a prominence of 0", category=Warning)
+            prom, _, _ = peak_prominences(-signal, troughs_idx)
         thr = float(min_prominence)
 
         if prom_adapt and prom.size:

@@ -349,9 +349,15 @@ def extract_pmu_task_signals(
             "message": f"Missing PMU files in {physio_dir}",
         }
 
-    resp_data = parse_pmu_file(resp_files[0])
-    puls_data = parse_pmu_file(puls_files[0])
-    ext_data = parse_pmu_file(ext_files[0])
+    try:
+        resp_data = parse_pmu_file(resp_files[0])
+        puls_data = parse_pmu_file(puls_files[0])
+        ext_data = parse_pmu_file(ext_files[0])
+    except PermissionError as e:
+        return {
+            "success": False,
+            "message": f"Permission denied reading PMU file: {e.filename}",
+        }
 
     scans = identify_scans_from_volume_markers(
         ext_data["volume_markers"],

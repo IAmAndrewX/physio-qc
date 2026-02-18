@@ -15,6 +15,12 @@ from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2
 from utils import peak_editing, export
 
 
+@st.cache_data(show_spinner="Scanning data directory...")
+def _cached_scan_data_directory(base_path):
+    """Cached wrapper so the filesystem scan only runs once per path."""
+    return scan_data_directory(base_path)
+
+
 st.set_page_config(
     page_title="Physio QC",
     page_icon="📈",
@@ -133,7 +139,7 @@ def init_session_state():
 def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name, sampling_rate,
                        hr_interpolated=None, hr_bpm=None, quality_continuous=None,
                        selected_quality_metrics=None, quality_data=None, ui_revision='constant',
-                       zoom_range=None):
+                       zoom_range=None, phase_data=None):
     """Create 3-panel plot for signal visualization with synchronized zooming"""
     signal_key = str(signal_name).strip().lower()
     if signal_key == 'ecg':
@@ -179,11 +185,13 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
     deleted_peaks = np.setdiff1d(auto_peaks, current_peaks)
     added_peaks = np.setdiff1d(current_peaks, auto_peaks)
 
+    has_secondary = (phase_data is not None) or bool(selected_quality_metrics and quality_data)
+
     fig = make_subplots(
         rows=3, cols=1,
         subplot_titles=labels['subplots'],
         vertical_spacing=0.1,
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}]]
+        specs=[[{"secondary_y": False}], [{"secondary_y": has_secondary}], [{"secondary_y": False}]]
     )
 
     # Row 1: Raw vs Clean
@@ -192,7 +200,7 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
 
     # Row 2: Clean with Peaks
     fig.add_trace(
-        go.Scatter(x=time, y=clean, name=labels['signal'], line=dict(color='#00D4FF', width=1)),
+        go.Scatter(x=time, y=clean, name=labels['signal'], line=dict(color='#00D4FF', width=1), showlegend=False),
         row=2, col=1, secondary_y=False
     )
 
@@ -214,6 +222,25 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
                     opacity=0.7
                 ), row=2, col=1, secondary_y=True)
 
+    # Phase overlay on row 2 (secondary y-axis, 0-1)
+    if phase_data is not None:
+        fig.add_trace(go.Scatter(
+            x=time, y=phase_data,
+            name='Cycle Completion',
+            line=dict(color='#2ECC71', width=1.5, dash='dot'),
+            opacity=0.8,
+        ), row=2, col=1, secondary_y=True)
+        fig.update_yaxes(
+            title_text=config.Y_AXIS_LABELS.get(f'{signal_key}_phase', 'Cycle Completion'),
+            range=[0, 1.05], secondary_y=True, row=2, col=1
+        )
+        # Pin the primary (signal) y-axis so the phase axis cannot distort it
+        finite_clean = clean[np.isfinite(clean)]
+        if len(finite_clean) > 0:
+            sig_min, sig_max = np.min(finite_clean), np.max(finite_clean)
+            pad = max(0.05, (sig_max - sig_min) * 0.15)
+            fig.update_yaxes(range=[sig_min - pad, sig_max + pad], secondary_y=False, row=2, col=1)
+
     # Row 3: Interpolated rate series
     if hr_interpolated is not None:
         fig.add_trace(go.Scatter(
@@ -228,6 +255,12 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
             pad = max(5, (p99 - p1) * 0.1)
             fig.update_yaxes(range=[max(0, p1 - pad), p99 + pad], row=3, col=1)
 
+    # Y-axis titles
+    fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{signal_key}_raw', ''), row=1, col=1)
+    fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{signal_key}_peaks', ''), row=2, col=1, secondary_y=False)
+    hr_label = f'{signal_key}_hr'
+    fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(hr_label, ''), row=3, col=1)
+
     fig.update_xaxes(matches='x', rangemode='nonnegative')
     if zoom_range is not None:
         fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
@@ -237,13 +270,16 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
     return fig
 
 
-def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_peaks, auto_troughs, 
-                       signal_name, rate_interpolated=None, rate_bpm=None, 
-                       bp_data=None, hr_data=None, ui_revision='constant', 
-                       zoom_range=None, calibration_regions=None):
+def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_peaks, auto_troughs,
+                       signal_name, rate_interpolated=None, rate_bpm=None,
+                       bp_data=None, hr_data=None, ui_revision='constant',
+                       zoom_range=None, calibration_regions=None, rvt_data=None,
+                       phase_data=None):
     """Create 3 or 4-panel plot for RSP/BP with synchronized zooming"""
     signal_key = str(signal_name).strip().lower()
     is_bp = signal_key == 'bp'
+    has_rvt = rvt_data is not None and not is_bp
+    has_phase = phase_data is not None and not is_bp
 
     if is_bp:
         labels = {
@@ -268,12 +304,15 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             base_label = 'Respiration'
         else:
             base_label = str(signal_name)
+        subplot_titles = [
+            f'Raw {base_label} vs Filtered {base_label}',
+            f'Filtered {base_label} with Inhalation/Exhalation Markers',
+            'Respiratory Rate (breaths/min)',
+        ]
+        if has_rvt:
+            subplot_titles.append('Respiratory Volume per Time (RVT)')
         labels = {
-            'subplots': [
-                f'Raw {base_label} vs Filtered {base_label}',
-                f'Filtered {base_label} with Inhalation/Exhalation Markers',
-                'Respiratory Rate (breaths/min)',
-            ],
+            'subplots': subplot_titles,
             'raw': f'Raw {base_label}',
             'clean': f'Filtered {base_label}',
             'signal': f'Filtered {base_label}',
@@ -284,14 +323,18 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
         }
 
     # 1. Row Configuration
-    n_rows = 4 if is_bp else 3
+    n_rows = 4 if (is_bp or has_rvt) else 3
     height = 1000 if n_rows == 4 else 800
+
+    # Enable secondary y-axis on row 2 for phase overlay
+    specs = [[{"secondary_y": (i == 1 and has_phase)}] for i in range(n_rows)]
 
     fig = make_subplots(
         rows=n_rows, cols=1,
         subplot_titles=labels['subplots'],
         vertical_spacing=0.07,
-        shared_xaxes=True
+        shared_xaxes=True,
+        specs=specs,
     )
 
     # --- Row 1: Raw vs Filtered ---
@@ -315,6 +358,30 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             name=labels['troughs'], marker=dict(color='#4444FF', size=8)
         ), row=2, col=1)
 
+    # Phase overlay on row 2 (secondary y-axis, 0-1)
+    if has_phase:
+        fig.add_trace(go.Scatter(
+            x=time, y=phase_data,
+            name='Cycle Completion',
+            line=dict(color='#2ECC71', width=1.5, dash='dot'),
+            opacity=0.8,
+        ), row=2, col=1, secondary_y=True)
+        # Determine prefix for label lookup
+        if signal_key in {'spirometer', 'spiro', 'mask flow', 'maskflow'}:
+            phase_label_key = 'spiro_phase'
+        else:
+            phase_label_key = 'rsp_phase'
+        fig.update_yaxes(
+            title_text=config.Y_AXIS_LABELS.get(phase_label_key, 'Cycle Completion'),
+            range=[0, 1.05], secondary_y=True, row=2, col=1
+        )
+        # Pin the primary (signal) y-axis so the phase axis cannot distort it
+        finite_clean = clean[np.isfinite(clean)]
+        if len(finite_clean) > 0:
+            sig_min, sig_max = np.min(finite_clean), np.max(finite_clean)
+            pad = max(0.05, (sig_max - sig_min) * 0.15)
+            fig.update_yaxes(range=[sig_min - pad, sig_max + pad], secondary_y=False, row=2, col=1)
+
     # --- Row 3: BP Metrics (SBP/MAP/DBP) or RSP Rate ---
     if is_bp and bp_data is not None:
         t_4hz = bp_data['time_4hz']
@@ -333,6 +400,18 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             pad = max(2, (p99 - p1) * 0.1)
             fig.update_yaxes(range=[max(0, p1 - pad), p99 + pad], row=3, col=1)
 
+    # --- Row 4: RVT (RSP only) ---
+    if has_rvt:
+        fig.add_trace(
+            go.Scatter(x=time, y=rvt_data, name='RVT', line=dict(color='#A78BFA', width=2)),
+            row=4, col=1
+        )
+        finite_rvt = rvt_data[np.isfinite(rvt_data)]
+        if len(finite_rvt) > 0:
+            p1, p99 = np.percentile(finite_rvt, [1, 99])
+            pad = max(0.01, (p99 - p1) * 0.1)
+            fig.update_yaxes(range=[p1 - pad, p99 + pad], row=4, col=1)
+
     # --- Row 4: Heart Rate (BP only) ---
     if is_bp and hr_data is not None:
         fig.add_trace(
@@ -345,6 +424,25 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             p1, p99 = np.percentile(finite_hr, [1, 99])
             pad = max(5, (p99 - p1) * 0.1)
             fig.update_yaxes(range=[max(0, p1 - pad), p99 + pad], row=4, col=1)
+
+    # Y-axis titles
+    if is_bp:
+        prefix = 'bp'
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_raw', ''), row=1, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_peaks', ''), row=2, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_metrics', ''), row=3, col=1)
+        if n_rows >= 4:
+            fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_hr', ''), row=4, col=1)
+    else:
+        if signal_key in {'spirometer', 'spiro', 'mask flow', 'maskflow'}:
+            prefix = 'spiro'
+        else:
+            prefix = 'rsp'
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_raw', ''), row=1, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_peaks', ''), row=2, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_rate', ''), row=3, col=1)
+        if has_rvt and n_rows >= 4:
+            fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_rvt', ''), row=4, col=1)
 
     # Formatting
     fig.update_xaxes(matches='x', rangemode='nonnegative')
@@ -502,7 +600,11 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
 
     st.header(header_title)
 
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+    is_rsp = signal_key == 'rsp'
+    if is_rsp:
+        col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+    else:
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
 
     with col1:
         method = st.selectbox("Cleaning Method", config.RSP_CLEANING_METHODS, key=f'{state_prefix}_method')
@@ -519,7 +621,17 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
         with st.expander("ℹ️ Amplitude Info"):
             st.info(config.RSP_AMPLITUDE_INFO.get(amplitude_method, "No info available"))
 
-    with col4:
+    rvt_method = 'none'
+    if is_rsp:
+        with col4:
+            rvt_method = st.selectbox("RVT Method", config.RVT_METHODS, key=f'{state_prefix}_rvt_method')
+            with st.expander("ℹ️ RVT Info"):
+                st.info(config.RVT_METHOD_INFO.get(rvt_method, "No info available"))
+        process_col = col5
+    else:
+        process_col = col4
+
+    with process_col:
         st.write("")
         st.write("")
         process_clicked = st.button(
@@ -528,6 +640,8 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
             key=f'process_{state_prefix}',
             width='stretch'
         )
+        show_phase = st.checkbox("Show Phase", value=False, key=f'{state_prefix}_show_phase',
+                                  help="Overlay respiratory cycle completion (0→1) from trough to trough on the signal plot.")
 
     if process_clicked:
         signal = data['df'][data['signal_mappings'][signal_key]].values
@@ -535,7 +649,8 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
         params = {
             'method': method,
             'peak_method': peak_method,
-            'amplitude_method': amplitude_method if amplitude_method != 'none' else None
+            'amplitude_method': amplitude_method if amplitude_method != 'none' else None,
+            'rvt_method': rvt_method,
         }
         st.session_state[params_state_key].update(params)
 
@@ -595,6 +710,7 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
 
         signal_zoom = (st.session_state[region_start_key], st.session_state[region_end_key])
 
+        phase_data = result.get('rsp_cycle_completion') if show_phase else None
         fig = create_rsp_bp_plot(
             time, result['raw'], result['clean'],
             result['current_peaks'], result['current_troughs'],
@@ -603,7 +719,9 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
             rate_interpolated=result.get('br_interpolated'),
             rate_bpm=result.get('br_bpm'),
             ui_revision=f'{state_prefix}_plot',
-            zoom_range=signal_zoom
+            zoom_range=signal_zoom,
+            rvt_data=result.get('rvt'),
+            phase_data=phase_data,
         )
         if hasattr(st.session_state, 'task'):
             add_task_event_lines(
@@ -814,7 +932,7 @@ def main():
 
                 st.stop()
 
-        participants_data = scan_data_directory(config.BASE_DATA_PATH)
+        participants_data = _cached_scan_data_directory(config.BASE_DATA_PATH)
 
         if not participants_data:
             st.error(f"No data found in {config.BASE_DATA_PATH}")
@@ -968,7 +1086,10 @@ def main():
             with col2:
                 powerline = st.selectbox("Powerline Frequency", config.POWERLINE_FREQUENCIES, key='ecg_powerline')
                 correct_artifacts = st.checkbox("Artifact Correction", key='ecg_correct')
-                calculate_quality = st.checkbox("Calculate Quality", value=True, key='ecg_quality')
+                calculate_quality = st.checkbox("Calculate Quality", value=True, key='ecg_quality',
+                                                help="Compute per-beat quality scores using template matching and average QRS distance.")
+                show_ecg_phase = st.checkbox("Show Phase", value=False, key='ecg_show_phase',
+                                              help="Overlay cardiac cycle completion (0→1) from R-peak to R-peak on the signal plot.")
 
             with col3:
                 st.write("")
@@ -1020,6 +1141,17 @@ def main():
                 quality_available = []
                 if st.session_state.ecg_params.get('calculate_quality', False):
                     st.subheader("Quality Metrics Display")
+                    with st.expander("What do the quality metrics mean?"):
+                        st.markdown(
+                            "**Template Match** — Correlates each beat's shape against the average beat. "
+                            "High values across all beats (e.g. >0.95) indicate consistent morphology; "
+                            "low values flag abnormal or noisy beats.\n\n"
+                            "**Average QRS** — Measures each beat's distance from the average QRS complex, "
+                            "scaled 0–1. 1 = closest to the average, 0 = most distant. Note: if most beats "
+                            "are poor, the average itself may be unreliable.\n\n"
+                            "**Zhao 2018** — Categorical rating (Excellent / Barely acceptable / Unacceptable) "
+                            "based on power spectrum, kurtosis, and baseline power of the QRS."
+                        )
 
                     # Continuous metrics
                     continuous_metrics = []
@@ -1032,13 +1164,14 @@ def main():
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         if result.get('quality_templatematch_mean') is not None:
-                            st.metric("Template Match Quality", f"{result['quality_templatematch_mean']:.3f}")
+                            st.metric("Template Match", f"{result['quality_templatematch_mean']:.3f}")
                     with col2:
                         if result.get('quality_averageqrs_mean') is not None:
-                            st.metric("Average QRS Quality", f"{result['quality_averageqrs_mean']:.3f}")
+                            st.metric("Average QRS", f"{result['quality_averageqrs_mean']:.3f}")
                     with col3:
-                        if result.get('quality_mean') is not None:
-                            st.metric("Overall Quality", f"{result['quality_mean']:.3f}")
+                        zhao = result.get('quality_zhao')
+                        if zhao is not None and zhao != "Not calculated":
+                            st.metric("Zhao 2018", str(zhao))
 
                     # Multiselect for continuous metrics
                     selected_quality_metrics = st.multiselect(
@@ -1089,6 +1222,7 @@ def main():
                 # Get zoom range from session state
                 ecg_zoom = (st.session_state.ecg_region_start, st.session_state.ecg_region_end)
 
+                ecg_phase_data = result.get('ecg_cardiac_cycle_completion') if show_ecg_phase else None
                 fig = create_signal_plot(
                     time, result['raw'], result['clean'],
                     result['current_r_peaks'], result['auto_r_peaks'],
@@ -1098,7 +1232,8 @@ def main():
                     selected_quality_metrics=selected_quality_metrics,
                     quality_data=quality_data,
                     ui_revision='ecg_plot',  # Preserve zoom state
-                    zoom_range=ecg_zoom  # Apply zoom from region inputs
+                    zoom_range=ecg_zoom,  # Apply zoom from region inputs
+                    phase_data=ecg_phase_data,
                 )
                 add_task_event_lines(
                     fig,
@@ -1914,8 +2049,8 @@ def main():
                 # Layout
                 fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
                 fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
-                fig.update_yaxes(title_text="CO2 (mmHg)", row=1, col=1)
-                fig.update_yaxes(title_text="ETCO2 (mmHg)", row=2, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_raw'], row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_envelope'], row=2, col=1)
 
                 fig.update_layout(
                     height=800,
@@ -2243,8 +2378,8 @@ def main():
                 # Layout
                 fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
                 fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
-                fig.update_yaxes(title_text="O2 (mmHg)", row=1, col=1)
-                fig.update_yaxes(title_text="ETO2 (mmHg)", row=2, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_raw'], row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_envelope'], row=2, col=1)
 
                 fig.update_layout(
                     height=800,
@@ -2572,7 +2707,7 @@ def main():
                 # Layout
                 fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
                 fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
-                fig.update_yaxes(title_text="SpO2 (%)", row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_raw'], row=1, col=1)
                 # Dynamic SpO2 axis limits to avoid hard-coded lower bounds.
                 spo2_clean = np.asarray(result['cleaned_signal'], dtype=float)
                 finite_spo2 = spo2_clean[np.isfinite(spo2_clean)]
@@ -2587,9 +2722,9 @@ def main():
                     y_max = upper_anchor + pad
                     if y_max - y_min < 2.0:
                         y_max = y_min + 2.0
-                    fig.update_yaxes(title_text="SpO2 (%)", row=2, col=1, range=[y_min, y_max])
+                    fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_clean'], row=2, col=1, range=[y_min, y_max])
                 else:
-                    fig.update_yaxes(title_text="SpO2 (%)", row=2, col=1)
+                    fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_clean'], row=2, col=1)
 
                 fig.update_layout(
                     height=700,
@@ -2695,6 +2830,18 @@ def main():
 
             if st.button("Export All Signals", type="primary"):
                 results_dict, params_dict = {}, {}
+
+                if st.session_state.ecg_result is not None:
+                    results_dict['ecg'] = st.session_state.ecg_result
+                    params_dict['ecg'] = st.session_state.ecg_params
+
+                if st.session_state.rsp_result is not None:
+                    results_dict['rsp'] = st.session_state.rsp_result
+                    params_dict['rsp'] = st.session_state.rsp_params
+
+                if st.session_state.ppg_result is not None:
+                    results_dict['ppg'] = st.session_state.ppg_result
+                    params_dict['ppg'] = st.session_state.ppg_params
 
                 if st.session_state.bp_result is not None:
                     from metrics.blood_pressure import calculate_bp_metrics

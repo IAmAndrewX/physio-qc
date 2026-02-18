@@ -166,6 +166,156 @@ def calculate_breathing_rate(troughs, sampling_rate, signal_length, rate_method=
     }
 
 
+def compute_rvt(rsp_signal, sampling_rate, method="power2020"):
+    """
+    Compute Respiratory Volume per Time (RVT) using NeuroKit2.
+
+    Parameters
+    ----------
+    rsp_signal : array
+        Cleaned respiration signal
+    sampling_rate : int
+        Sampling rate in Hz
+    method : str
+        RVT method ('power2020', 'harrison2021', 'birn2006')
+
+    Returns
+    -------
+    array or None
+        RVT time series, or None on failure
+    """
+    try:
+        rvt = nk.rsp_rvt(rsp_signal, sampling_rate=sampling_rate, method=method)
+        if isinstance(rvt, np.ndarray):
+            return rvt
+        # nk.rsp_rvt may return a DataFrame/Series
+        return np.asarray(rvt).ravel()
+    except Exception:
+        return None
+
+
+def compute_rsp_phase(rsp_clean, peaks, troughs):
+    """Compute respiratory phase, phase completion, and full cycle completion.
+
+    Uses nk.rsp_phase() for binary phase and within-phase completion,
+    then builds full cycle completion (0->1) preserving natural I:E ratio.
+
+    Parameters
+    ----------
+    rsp_clean : array
+        Cleaned respiration signal
+    peaks : array
+        Inhalation peak indices
+    troughs : array
+        Exhalation trough indices
+
+    Returns
+    -------
+    dict or None
+        Dictionary with rsp_phase, rsp_phase_completion, rsp_cycle_completion
+    """
+    n = len(rsp_clean)
+    rsp_phase = None
+    rsp_phase_completion = None
+
+    # Try NeuroKit2 first
+    try:
+        phase_df = nk.rsp_phase(
+            rsp_clean,
+            peaks={"RSP_Peaks": peaks, "RSP_Troughs": troughs},
+        )
+        rsp_phase = phase_df["RSP_Phase"].values
+        rsp_phase_completion = phase_df["RSP_Phase_Completion"].values
+    except Exception:
+        pass
+
+    # Manual fallback: compute phase directly from peaks and troughs
+    if rsp_phase is None:
+        rsp_phase = np.zeros(n, dtype=int)
+        rsp_phase_completion = np.zeros(n, dtype=float)
+
+        sorted_peaks = np.sort(peaks)
+        sorted_troughs = np.sort(troughs)
+
+        events = np.concatenate([sorted_troughs, sorted_peaks])
+        # 0 = trough (inhalation starts), 1 = peak (exhalation starts)
+        labels = np.concatenate([
+            np.zeros(len(sorted_troughs), dtype=int),
+            np.ones(len(sorted_peaks), dtype=int),
+        ])
+        order = np.argsort(events)
+        events = events[order]
+        labels = labels[order]
+
+        for idx in range(len(events)):
+            start = int(events[idx])
+            end = int(events[idx + 1]) if idx + 1 < len(events) else n
+            segment_len = end - start
+
+            if labels[idx] == 0:  # trough -> inhalation
+                rsp_phase[start:end] = 1
+            else:  # peak -> exhalation
+                rsp_phase[start:end] = 0
+
+            if segment_len > 0:
+                rsp_phase_completion[start:end] = np.linspace(
+                    0, 1, segment_len, endpoint=False
+                )
+
+    cycle_completion = np.full(n, np.nan)
+
+    if len(troughs) < 2:
+        return {
+            "rsp_phase": rsp_phase,
+            "rsp_phase_completion": rsp_phase_completion,
+            "rsp_cycle_completion": cycle_completion,
+        }
+
+    for i in range(len(troughs) - 1):
+        t_start = troughs[i]
+        t_end = troughs[i + 1]
+        cycle_len = t_end - t_start
+        if cycle_len <= 0:
+            continue
+
+        # Find inhalation duration within this cycle
+        # Inhalation = phase==1 in the range [t_start, t_end)
+        cycle_phase = rsp_phase[t_start:t_end]
+        inh_samples = np.sum(cycle_phase == 1)
+        inh_proportion = inh_samples / cycle_len
+
+        # Map inhalation completion to [0, inh_proportion]
+        # Map exhalation completion to [inh_proportion, 1]
+        for j in range(t_start, t_end):
+            if rsp_phase[j] == 1:  # inhalation
+                cycle_completion[j] = rsp_phase_completion[j] * inh_proportion
+            else:  # exhalation
+                cycle_completion[j] = inh_proportion + rsp_phase_completion[j] * (1.0 - inh_proportion)
+
+    # Handle last incomplete cycle (after last trough)
+    if troughs[-1] < n - 1:
+        last_start = troughs[-1]
+        remaining = n - last_start
+        if remaining > 1:
+            # Use average cycle duration for proportion estimate
+            avg_cycle = np.mean(np.diff(troughs))
+            if avg_cycle > 0:
+                for j in range(last_start, n):
+                    if rsp_phase[j] == 1:
+                        inh_samples_last = np.sum(rsp_phase[last_start:n] == 1)
+                        est_proportion = inh_samples_last / avg_cycle if avg_cycle > 0 else 0.5
+                        est_proportion = min(est_proportion, 1.0)
+                        cycle_completion[j] = rsp_phase_completion[j] * est_proportion
+                    else:
+                        cycle_completion[j] = rsp_phase_completion[j]
+
+    return {
+        "rsp_phase": rsp_phase,
+        "rsp_phase_completion": rsp_phase_completion,
+        "rsp_cycle_completion": cycle_completion,
+    }
+
+
 def process_rsp(signal, sampling_rate, params):
     """
     Complete respiration processing pipeline
@@ -246,5 +396,15 @@ def process_rsp(signal, sampling_rate, params):
     }
 
     result.update(br_result)
+
+    rvt_method = params.get("rvt_method", "none")
+    if rvt_method and rvt_method != "none":
+        rvt = compute_rvt(rsp_clean, sampling_rate, method=rvt_method)
+        if rvt is not None:
+            result["rvt"] = rvt
+
+    phase_result = compute_rsp_phase(rsp_clean, peaks, troughs)
+    if phase_result is not None:
+        result.update(phase_result)
 
     return result

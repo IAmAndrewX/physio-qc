@@ -178,6 +178,70 @@ def calculate_hr(r_peaks, sampling_rate, signal_length, rate_method="monotone_cu
     }
 
 
+def compute_ecg_phase(ecg_clean, r_peaks, sampling_rate):
+    """Compute cardiac phase and cycle completion.
+
+    Uses nk.ecg_phase() for ventricular phase (systole/diastole) and
+    completion, then builds full cardiac cycle completion (R-peak to R-peak).
+
+    Parameters
+    ----------
+    ecg_clean : array
+        Cleaned ECG signal
+    r_peaks : array
+        R-peak sample indices
+    sampling_rate : int
+        Sampling rate in Hz
+
+    Returns
+    -------
+    dict or None
+        Dictionary with ventricular phase, completion, systole/diastole
+        completions, cardiac cycle completion, and diastole onsets
+    """
+    try:
+        phase_df = nk.ecg_phase(
+            ecg_clean,
+            rpeaks=r_peaks,
+            sampling_rate=sampling_rate,
+        )
+        ventricular_phase = phase_df["ECG_Phase_Ventricular"].values
+        ventricular_completion = phase_df["ECG_Phase_Completion_Ventricular"].values
+    except Exception:
+        return None
+
+    n = len(ecg_clean)
+
+    # Separate systole / diastole completions
+    systole_completion = np.full(n, np.nan)
+    diastole_completion = np.full(n, np.nan)
+    systole_mask = ventricular_phase == 1
+    diastole_mask = ventricular_phase == 0
+    systole_completion[systole_mask] = ventricular_completion[systole_mask]
+    diastole_completion[diastole_mask] = ventricular_completion[diastole_mask]
+
+    # Full cardiac cycle completion: linspace 0->1 from R-peak[i] to R-peak[i+1]
+    cardiac_cycle_completion = np.full(n, np.nan)
+    for i in range(len(r_peaks) - 1):
+        start = r_peaks[i]
+        end = r_peaks[i + 1]
+        length = end - start
+        if length > 0:
+            cardiac_cycle_completion[start:end] = np.linspace(0, 1, length, endpoint=False)
+
+    # Detect diastole onsets: transitions from systole (1) to diastole (0)
+    diastole_onsets = np.where(np.diff(ventricular_phase) == -1)[0] + 1
+
+    return {
+        "ecg_ventricular_phase": ventricular_phase,
+        "ecg_ventricular_completion": ventricular_completion,
+        "ecg_systole_completion": systole_completion,
+        "ecg_diastole_completion": diastole_completion,
+        "ecg_cardiac_cycle_completion": cardiac_cycle_completion,
+        "ecg_diastole_onsets": diastole_onsets,
+    }
+
+
 def process_ecg(signal, sampling_rate, params):
     """
     Complete ECG processing pipeline
@@ -262,5 +326,9 @@ def process_ecg(signal, sampling_rate, params):
         result["quality_zhao"] = "Not calculated"
         result["quality_continuous"] = np.array([])
         result["quality_mean"] = 0.0
+
+    phase_result = compute_ecg_phase(ecg_clean, r_peaks, sampling_rate)
+    if phase_result is not None:
+        result.update(phase_result)
 
     return result

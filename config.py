@@ -166,6 +166,15 @@ RSP_AMPLITUDE_INFO = {
     'none': 'No normalization - Use original signal amplitude'
 }
 
+RVT_METHODS = ['none', 'power2020', 'harrison2021', 'birn2006']
+
+RVT_METHOD_INFO = {
+    'none': 'Disable RVT computation',
+    'power2020': 'Power et al. (2020) - Breath-volume normalized by breath duration, interpolated to signal length',
+    'harrison2021': 'Harrison et al. (2021) - Hilbert-transform envelope approach for continuous RVT estimation',
+    'birn2006': 'Birn et al. (2006) - Classic RVT: peak-to-trough amplitude divided by breath period',
+}
+
 DEFAULT_RSP_PARAMS = {
     'method': 'khodadad2018',
     'peak_method': 'scipy',
@@ -176,7 +185,8 @@ DEFAULT_RSP_PARAMS = {
     'filter_type': 'butterworth',
     'filter_order': 5,
     'apply_lowcut': True,
-    'apply_highcut': True
+    'apply_highcut': True,
+    'rvt_method': 'none'
 }
 
 # =============================================================================
@@ -453,6 +463,50 @@ TASK_EVENT_ALIASES = {
     'sts':          'sts',
     'sittostand':   'sts',
     'stand':        'sts',
+}
+
+# =============================================================================
+# Y-AXIS LABELS (edit these to change axis titles across all plots)
+# =============================================================================
+
+Y_AXIS_LABELS = {
+    # ECG
+    'ecg_raw': 'Amplitude (mV)',
+    'ecg_clean': 'Amplitude (mV)',
+    'ecg_peaks': 'Amplitude (mV)',
+    'ecg_hr': 'Heart Rate (BPM)',
+    'ecg_phase': 'Cycle Completion',
+    # RSP
+    'rsp_raw': 'Amplitude (a.u.)',
+    'rsp_clean': 'Amplitude (a.u.)',
+    'rsp_peaks': 'Amplitude (a.u.)',
+    'rsp_rate': 'Breathing Rate (breaths/min)',
+    'rsp_rvt': 'RVT (a.u.)',
+    'rsp_phase': 'Cycle Completion',
+    # Spirometer
+    'spiro_raw': 'Flow (a.u.)',
+    'spiro_clean': 'Flow (a.u.)',
+    'spiro_peaks': 'Flow (a.u.)',
+    'spiro_rate': 'Breathing Rate (breaths/min)',
+    'spiro_phase': 'Cycle Completion',
+    # PPG
+    'ppg_raw': 'Amplitude (a.u.)',
+    'ppg_clean': 'Amplitude (a.u.)',
+    'ppg_peaks': 'Amplitude (a.u.)',
+    'ppg_hr': 'Pulse Rate (BPM)',
+    # BP
+    'bp_raw': 'Pressure (mmHg)',
+    'bp_filtered': 'Pressure (mmHg)',
+    'bp_peaks': 'Pressure (mmHg)',
+    'bp_metrics': 'Pressure (mmHg)',
+    'bp_hr': 'Heart Rate (BPM)',
+    # Gas channels
+    'etco2_raw': 'CO2 (mmHg)',
+    'etco2_envelope': 'ETCO2 (mmHg)',
+    'eto2_raw': 'O2 (mmHg)',
+    'eto2_envelope': 'ETO2 (mmHg)',
+    'spo2_raw': 'SpO2 (%)',
+    'spo2_clean': 'SpO2 (%)',
 }
 
 # =============================================================================

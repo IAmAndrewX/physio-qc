@@ -406,7 +406,7 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
 
     # --- Row 3: BP Metrics (SBP/MAP/DBP) or RSP Rate ---
     if is_bp_like and bp_data is not None:
-    if is_bp and bp_data is not None:
+    #if is_bp and bp_data is not None:
         t_4hz = bp_data['time_4hz']
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)

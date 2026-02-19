@@ -279,6 +279,27 @@ def _find_scanner_physio_dir(
     return None, None
 
 
+def _find_available_scanner_sessions(
+    base_physio_path: Path,
+    participant: str,
+    folder_variants: tuple[str, ...] = DEFAULT_SCANNER_DIR_VARIANTS,
+) -> list[str]:
+    """Return participant sessions that contain a scanner PMU folder variant."""
+    participant_root = base_physio_path / participant
+    if not participant_root.exists():
+        return []
+
+    available_sessions: list[str] = []
+    for ses_dir in sorted(participant_root.glob("ses-*")):
+        if not ses_dir.is_dir():
+            continue
+        for variant in folder_variants:
+            if (ses_dir / variant).exists():
+                available_sessions.append(ses_dir.name)
+                break
+    return available_sessions
+
+
 def extract_pmu_task_signals(
     *,
     base_physio_path: str | Path,
@@ -306,9 +327,17 @@ def extract_pmu_task_signals(
 
     physio_dir, resolved_pmu_session = _find_scanner_physio_dir(base_physio_path, participant_label, pmu_sessions)
     if physio_dir is None:
+        available_sessions = _find_available_scanner_sessions(base_physio_path, participant_label)
+        if available_sessions:
+            availability_msg = f" Available scanner PMU sessions for this participant: {', '.join(available_sessions)}."
+        else:
+            availability_msg = " No scanner PMU folders were found for this participant."
         return {
             "success": False,
-            "message": f"No PMU scanner folder found for {participant_label} in sessions: {', '.join(pmu_sessions)}",
+            "message": (
+                f"No PMU scanner folder found for {participant_label} "
+                f"in sessions: {', '.join(pmu_sessions)}.{availability_msg}"
+            ),
         }
 
     resp_files = sorted(physio_dir.glob("*.resp"))
@@ -320,9 +349,15 @@ def extract_pmu_task_signals(
             "message": f"Missing PMU files in {physio_dir}",
         }
 
-    resp_data = parse_pmu_file(resp_files[0])
-    puls_data = parse_pmu_file(puls_files[0])
-    ext_data = parse_pmu_file(ext_files[0])
+    try:
+        resp_data = parse_pmu_file(resp_files[0])
+        puls_data = parse_pmu_file(puls_files[0])
+        ext_data = parse_pmu_file(ext_files[0])
+    except PermissionError as e:
+        return {
+            "success": False,
+            "message": f"Permission denied reading PMU file: {e.filename}",
+        }
 
     scans = identify_scans_from_volume_markers(
         ext_data["volume_markers"],

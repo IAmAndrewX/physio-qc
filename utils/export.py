@@ -52,6 +52,11 @@ def create_combined_dataframe(results_dict, sampling_rate):
         )
         data['ecg_hr_interpolated'] = ecg_result['hr_interpolated'].astype(config.EXPORT_DTYPE_SIGNALS)
 
+        if 'ecg_ventricular_phase' in ecg_result:
+            data['ecg_phase_ventricular'] = ecg_result['ecg_ventricular_phase'].astype(config.EXPORT_DTYPE_ONSETS)
+            data['ecg_phase_completion_ventricular'] = ecg_result['ecg_ventricular_completion'].astype(config.EXPORT_DTYPE_SIGNALS)
+            data['ecg_cardiac_cycle_completion'] = ecg_result['ecg_cardiac_cycle_completion'].astype(config.EXPORT_DTYPE_SIGNALS)
+
     if 'rsp' in results_dict and results_dict['rsp'] is not None:
         rsp_result = results_dict['rsp']
         signal_length = len(rsp_result['raw'])
@@ -69,6 +74,14 @@ def create_combined_dataframe(results_dict, sampling_rate):
             signal_length
         )
         data['rsp_br_interpolated'] = rsp_result['br_interpolated'].astype(config.EXPORT_DTYPE_SIGNALS)
+
+        if 'rvt' in rsp_result:
+            data['rsp_rvt'] = rsp_result['rvt'].astype(config.EXPORT_DTYPE_SIGNALS)
+
+        if 'rsp_phase' in rsp_result:
+            data['rsp_phase'] = rsp_result['rsp_phase'].astype(config.EXPORT_DTYPE_ONSETS)
+            data['rsp_phase_completion'] = rsp_result['rsp_phase_completion'].astype(config.EXPORT_DTYPE_SIGNALS)
+            data['rsp_cycle_completion'] = rsp_result['rsp_cycle_completion'].astype(config.EXPORT_DTYPE_SIGNALS)
 
     if 'ppg' in results_dict and results_dict['ppg'] is not None:
         ppg_result = results_dict['ppg']
@@ -168,6 +181,9 @@ def create_metadata_json(results_dict, params_dict, sampling_rate):
             "AddedPeakIndices": ecg_info['added_indices'].tolist()
         }
         columns.extend(["ecg_raw", "ecg_clean", "ecg_r_peaks", "ecg_hr_interpolated"])
+        if 'ecg_ventricular_phase' in ecg_result:
+            metadata['ECG']['PhaseComputed'] = True
+            columns.extend(["ecg_phase_ventricular", "ecg_phase_completion_ventricular", "ecg_cardiac_cycle_completion"])
 
     if 'rsp' in results_dict and results_dict['rsp'] is not None:
         rsp_result = results_dict['rsp']
@@ -194,7 +210,15 @@ def create_metadata_json(results_dict, params_dict, sampling_rate):
             "DeletedExhalations": int(troughs_info['deleted_count']),
             "FinalBreathCount": int(troughs_info['final_count'])
         }
+        if 'rvt' in rsp_result:
+            metadata['RSP']['RVTMethod'] = rsp_params.get('rvt_method', 'unknown')
+        if 'rsp_phase' in rsp_result:
+            metadata['RSP']['PhaseComputed'] = True
         columns.extend(["rsp_raw", "rsp_clean", "rsp_inhalation_onsets", "rsp_exhalation_onsets", "rsp_br_interpolated"])
+        if 'rvt' in rsp_result:
+            columns.append("rsp_rvt")
+        if 'rsp_phase' in rsp_result:
+            columns.extend(["rsp_phase", "rsp_phase_completion", "rsp_cycle_completion"])
 
     if 'ppg' in results_dict and results_dict['ppg'] is not None:
         ppg_result = results_dict['ppg']

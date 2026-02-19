@@ -1,16 +1,28 @@
 .PHONY: help install run clean lint format test update
 
+VENV ?= .venv
+PYTHON ?= $(VENV)/bin/python
+PIP ?= $(VENV)/bin/pip
+STREAMLIT ?= $(VENV)/bin/streamlit
+RUFF ?= $(VENV)/bin/ruff
+MYPY ?= $(VENV)/bin/mypy
+PYTEST ?= $(VENV)/bin/pytest
+
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-15s %s\n", $$1, $$2}'
 
-install:  ## Install dependencies with uv
-	uv sync
+install:  ## Create .venv and install runtime dependencies
+	python3 -m venv $(VENV)
+	$(PYTHON) -m pip install --upgrade pip
+	$(PIP) install -e .
 
-install-dev:  ## Install dependencies including dev tools
-	uv sync --all-extras
+install-dev:  ## Create .venv and install runtime + dev dependencies
+	python3 -m venv $(VENV)
+	$(PYTHON) -m pip install --upgrade pip
+	$(PIP) install -e ".[dev]"
 
 run:  ## Run the Streamlit application
-	uv run streamlit run app.py
+	$(STREAMLIT) run app.py
 
 clean:  ## Remove virtual environment and cache files
 	rm -rf .venv
@@ -22,42 +34,42 @@ clean:  ## Remove virtual environment and cache files
 	find . -type f -name "*.pyc" -delete
 
 lint:  ## Run linter (ruff)
-	uv run ruff check .
+	$(RUFF) check .
 
 lint-fix:  ## Run linter and auto-fix issues
-	uv run ruff check --fix .
+	$(RUFF) check --fix .
 
 format:  ## Format code with ruff
-	uv run ruff format .
+	$(RUFF) format .
 
 format-check:  ## Check code formatting without modifying
-	uv run ruff format --check .
+	$(RUFF) format --check .
 
 type-check:  ## Run type checker (mypy)
-	uv run mypy metrics/ algorithms/ utils/ --ignore-missing-imports
+	$(MYPY) metrics/ algorithms/ utils/ --ignore-missing-imports
 
 test:  ## Run tests
-	uv run pytest -v
+	$(PYTEST) -v
 
 test-cov:  ## Run tests with coverage report
-	uv run pytest --cov=metrics --cov=algorithms --cov=utils --cov-report=html --cov-report=term
+	$(PYTEST) --cov=metrics --cov=algorithms --cov=utils --cov-report=html --cov-report=term
 
 update:  ## Update all dependencies
-	uv sync --upgrade
+	$(PYTHON) -m pip install --upgrade pip
+	$(PIP) install --upgrade -e ".[dev]"
 
-lock:  ## Update lock file without installing
-	uv lock
+lock:  ## Export pinned requirements
+	$(PIP) freeze > requirements.txt
 
 export-requirements:  ## Export requirements.txt for compatibility
-	uv pip freeze > requirements.txt
+	$(PIP) freeze > requirements.txt
 
 check:  ## Run all checks (lint, format, type-check)
-	@uv run ruff check .
-	@uv run ruff format --check .
-	@uv run mypy metrics/ algorithms/ utils/ --ignore-missing-imports
+	@$(RUFF) check .
+	@$(RUFF) format --check .
+	@$(MYPY) metrics/ algorithms/ utils/ --ignore-missing-imports
 
 setup:  ## First-time setup
-	@command -v uv >/dev/null 2>&1 || curl -LsSf https://astral.sh/uv/install.sh | sh
 	@make install
 
 dev:  ## Setup development environment

@@ -1,0 +1,43 @@
+{
+  "Description": "Task timing/protocol table used for plot event overlays and protocol documentation.",
+  "task": {
+    "Description": "Task key after alias normalization.",
+    "Levels": {
+      "breath": "Breathing protocol",
+      "gas": "Gas challenge protocol",
+      "rest": "Resting state protocol",
+      "sts": "Sit-to-stand protocol"
+    }
+  },
+  "protocol_variant": {
+    "Description": "Protocol variant for the task.",
+    "Levels": {
+      "default": "Default repository protocol",
+      "sub-00_override": "Participant-specific override for sub-00*",
+      "session_a": "Session-A STS protocol"
+    }
+  },
+  "participant_scope": {
+    "Description": "Participant/session scope where the row applies."
+  },
+  "onset": {
+    "Description": "Event/segment onset in seconds from task start.",
+    "Units": "s"
+  },
+  "duration": {
+    "Description": "Segment duration in seconds. 'n/a' indicates boundary-only event with no fixed end in code.",
+    "Units": "s"
+  },
+  "condition": {
+    "Description": "Human-readable condition label."
+  },
+  "gas": {
+    "Description": "Gas condition if applicable (Air, CO2, Carbogen, Off)."
+  },
+  "flow_lpm": {
+    "Description": "Flow rate in liters/minute when specified by protocol."
+  },
+  "source": {
+    "Description": "Primary source of the protocol definition."
+  }
+}

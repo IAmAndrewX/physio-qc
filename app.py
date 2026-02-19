@@ -15,6 +15,12 @@ from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2, doppler
 from utils import peak_editing, export
 
 
+@st.cache_data(show_spinner="Scanning data directory...")
+def _cached_scan_data_directory(base_path):
+    """Cached wrapper so the filesystem scan only runs once per path."""
+    return scan_data_directory(base_path)
+
+
 st.set_page_config(
     page_title="Physio QC",
     page_icon="📈",
@@ -144,29 +150,75 @@ def init_session_state():
 def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name, sampling_rate,
                        hr_interpolated=None, hr_bpm=None, quality_continuous=None,
                        selected_quality_metrics=None, quality_data=None, ui_revision='constant',
-                       zoom_range=None):
+                       zoom_range=None, phase_data=None):
     """Create 3-panel plot for signal visualization with synchronized zooming"""
+    signal_key = str(signal_name).strip().lower()
+    if signal_key == 'ecg':
+        labels = {
+            'subplots': (
+                'Raw ECG vs Filtered ECG',
+                'Filtered ECG with R-Peak Markers',
+                'Heart Rate (BPM)',
+            ),
+            'raw': 'Raw ECG',
+            'clean': 'Filtered ECG',
+            'signal': 'Filtered ECG',
+            'peaks': 'R-Peaks',
+            'rate': 'Heart Rate (Interpolated)',
+        }
+    elif signal_key == 'ppg':
+        labels = {
+            'subplots': (
+                'Raw PPG vs Filtered PPG',
+                'Filtered PPG with Systolic Peak Markers',
+                'Pulse Rate (BPM)',
+            ),
+            'raw': 'Raw PPG',
+            'clean': 'Filtered PPG',
+            'signal': 'Filtered PPG',
+            'peaks': 'Systolic Peaks',
+            'rate': 'Pulse Rate (Interpolated)',
+        }
+    else:
+        labels = {
+            'subplots': (
+                f'Raw {signal_name} vs Filtered {signal_name}',
+                f'Filtered {signal_name} with Peak Markers',
+                f'{signal_name} Rate',
+            ),
+            'raw': f'Raw {signal_name}',
+            'clean': f'Filtered {signal_name}',
+            'signal': f'Filtered {signal_name}',
+            'peaks': 'Detected Peaks',
+            'rate': f'{signal_name} Rate (Interpolated)',
+        }
+
     deleted_peaks = np.setdiff1d(auto_peaks, current_peaks)
     added_peaks = np.setdiff1d(current_peaks, auto_peaks)
 
+    has_secondary = (phase_data is not None) or bool(selected_quality_metrics and quality_data)
+
     fig = make_subplots(
         rows=3, cols=1,
-        subplot_titles=('Raw vs Clean', 'Clean with Peaks', f'{signal_name} Rate'),
+        subplot_titles=labels['subplots'],
         vertical_spacing=0.1,
-        specs=[[{"secondary_y": False}], [{"secondary_y": True}], [{"secondary_y": False}]]
+        specs=[[{"secondary_y": False}], [{"secondary_y": has_secondary}], [{"secondary_y": False}]]
     )
 
     # Row 1: Raw vs Clean
-    fig.add_trace(go.Scatter(x=time, y=raw, name='Raw', line=dict(color='#808080', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=time, y=clean, name='Clean', line=dict(color='#00D4FF', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=time, y=raw, name=labels['raw'], line=dict(color='#808080', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=time, y=clean, name=labels['clean'], line=dict(color='#00D4FF', width=1)), row=1, col=1)
 
     # Row 2: Clean with Peaks
-    fig.add_trace(go.Scatter(x=time, y=clean, name='Signal', line=dict(color='#00D4FF', width=1)), row=2, col=1, secondary_y=False)
+    fig.add_trace(
+        go.Scatter(x=time, y=clean, name=labels['signal'], line=dict(color='#00D4FF', width=1), showlegend=False),
+        row=2, col=1, secondary_y=False
+    )
 
     if len(current_peaks) > 0:
         fig.add_trace(go.Scatter(
             x=time[current_peaks], y=clean[current_peaks],
-            mode='markers', name='Valid Peaks',
+            mode='markers', name=labels['peaks'],
             marker=dict(color='#FF4444', size=8, symbol='circle')
         ), row=2, col=1, secondary_y=False)
 
@@ -181,33 +233,111 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
                     opacity=0.7
                 ), row=2, col=1, secondary_y=True)
 
-    # Row 3: Heart Rate
+    # Phase overlay on row 2 (secondary y-axis, 0-1)
+    if phase_data is not None:
+        fig.add_trace(go.Scatter(
+            x=time, y=phase_data,
+            name='Cycle Completion',
+            line=dict(color='#2ECC71', width=1.5, dash='dot'),
+            opacity=0.8,
+        ), row=2, col=1, secondary_y=True)
+        fig.update_yaxes(
+            title_text=config.Y_AXIS_LABELS.get(f'{signal_key}_phase', 'Cycle Completion'),
+            range=[0, 1.05], secondary_y=True, row=2, col=1
+        )
+        # Pin the primary (signal) y-axis so the phase axis cannot distort it
+        finite_clean = clean[np.isfinite(clean)]
+        if len(finite_clean) > 0:
+            sig_min, sig_max = np.min(finite_clean), np.max(finite_clean)
+            pad = max(0.05, (sig_max - sig_min) * 0.15)
+            fig.update_yaxes(range=[sig_min - pad, sig_max + pad], secondary_y=False, row=2, col=1)
+
+    # Row 3: Interpolated rate series
     if hr_interpolated is not None:
         fig.add_trace(go.Scatter(
             x=time, y=hr_interpolated,
-            name='HR Interpolated',
+            name=labels['rate'],
             line=dict(color='#FF6B6B', width=2)
         ), row=3, col=1)
+        # Clamp y-axis to physiological range using percentiles
+        finite_hr = hr_interpolated[np.isfinite(hr_interpolated)]
+        if len(finite_hr) > 0:
+            p1, p99 = np.percentile(finite_hr, [1, 99])
+            pad = max(5, (p99 - p1) * 0.1)
+            fig.update_yaxes(range=[max(0, p1 - pad), p99 + pad], row=3, col=1)
 
-    fig.update_xaxes(matches='x')
+    # Y-axis titles
+    fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{signal_key}_raw', ''), row=1, col=1)
+    fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{signal_key}_peaks', ''), row=2, col=1, secondary_y=False)
+    hr_label = f'{signal_key}_hr'
+    fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(hr_label, ''), row=3, col=1)
+
+    fig.update_xaxes(matches='x', rangemode='nonnegative')
     if zoom_range is not None:
-        fig.update_xaxes(range=[zoom_range[0], zoom_range[1]])
+        fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
 
     fig.update_layout(height=800, template='plotly_dark', showlegend=True, uirevision=ui_revision)
 
     return fig
 
 
-def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_peaks, auto_troughs, 
-                       signal_name, rate_interpolated=None, rate_bpm=None, 
-                       bp_data=None, hr_data=None, ui_revision='constant', 
-                       zoom_range=None, calibration_regions=None):
+def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_peaks, auto_troughs,
+                       signal_name, rate_interpolated=None, rate_bpm=None,
+                       bp_data=None, hr_data=None, ui_revision='constant',
+                       zoom_range=None, calibration_regions=None, rvt_data=None,
+                       phase_data=None):
     """Create 3 or 4-panel plot for RSP/BP with synchronized zooming"""
-    
+    signal_key = str(signal_name).strip().lower()
+    is_bp = signal_key == 'bp'
+    has_rvt = rvt_data is not None and not is_bp
+    has_phase = phase_data is not None and not is_bp
+
+    if is_bp:
+        labels = {
+            'subplots': [
+                'Raw Arterial Pressure vs Filtered Pressure',
+                'Filtered Pressure with Systolic/Diastolic Markers',
+                'Blood Pressure Metrics (SBP / MAP / DBP)',
+                'Heart Rate from BP Peaks (BPM)',
+            ],
+            'raw': 'Raw Arterial Pressure',
+            'clean': 'Filtered Arterial Pressure',
+            'signal': 'Filtered Arterial Pressure',
+            'peaks': 'Systolic Peaks',
+            'troughs': 'Diastolic Troughs',
+            'rate': 'Respiratory Rate (Interpolated)',
+            'hr_from_bp': 'Heart Rate from BP (Interpolated)',
+        }
+    else:
+        if signal_key in {'spirometer', 'spiro', 'mask flow', 'maskflow'}:
+            base_label = 'Spirometry Flow'
+        elif signal_key in {'rsp', 'resp', 'respiration'}:
+            base_label = 'Respiration'
+        else:
+            base_label = str(signal_name)
+        subplot_titles = [
+            f'Raw {base_label} vs Filtered {base_label}',
+            f'Filtered {base_label} with Inhalation/Exhalation Markers',
+            'Respiratory Rate (breaths/min)',
+        ]
+        if has_rvt:
+            subplot_titles.append('Respiratory Volume per Time (RVT)')
+        labels = {
+            'subplots': subplot_titles,
+            'raw': f'Raw {base_label}',
+            'clean': f'Filtered {base_label}',
+            'signal': f'Filtered {base_label}',
+            'peaks': 'Inhalation Peaks',
+            'troughs': 'Exhalation Troughs',
+            'rate': 'Respiratory Rate (Interpolated)',
+            'hr_from_bp': 'Heart Rate from BP (Interpolated)',
+        }
+
     # 1. Row Configuration
     is_bp_like = signal_name in ('BP', 'DOPPLER')  # <-- add Doppler here
 
     n_rows = 4 if is_bp_like else 3
+    n_rows = 4 if (is_bp or has_rvt) else 3
     height = 1000 if n_rows == 4 else 800
 
     titles = ['Raw vs Filtered', 'Signal with Peaks/Troughs']
@@ -217,48 +347,266 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     else:
         titles.append(f'{signal_name} Rate')
 
+    # Enable secondary y-axis on row 2 for phase overlay
+    specs = [[{"secondary_y": (i == 1 and has_phase)}] for i in range(n_rows)]
+
 
     fig = make_subplots(
         rows=n_rows, cols=1,
-        subplot_titles=titles,
+        subplot_titles=labels['subplots'],
         vertical_spacing=0.07,
-        shared_xaxes=True
+        shared_xaxes=True,
+        specs=specs,
     )
 
     # --- Row 1: Raw vs Filtered ---
-    fig.add_trace(go.Scatter(x=time, y=raw, name='Raw', line=dict(color='#808080', width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=time, y=clean, name='Filtered', line=dict(color='#00D4FF', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=time, y=raw, name=labels['raw'], line=dict(color='#808080', width=1)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=time, y=clean, name=labels['clean'], line=dict(color='#00D4FF', width=1)), row=1, col=1)
 
     # --- Row 2: Signal with Peaks/Troughs ---
-    fig.add_trace(go.Scatter(x=time, y=clean, name='Signal', line=dict(color='#00D4FF', width=1), showlegend=False), row=2, col=1)
+    fig.add_trace(
+        go.Scatter(x=time, y=clean, name=labels['signal'], line=dict(color='#00D4FF', width=1), showlegend=False),
+        row=2, col=1
+    )
 
     if len(current_peaks) > 0:
-        fig.add_trace(go.Scatter(x=time[current_peaks], y=clean[current_peaks], mode='markers', 
-                                 name='Systolic/Inhale', marker=dict(color='#FF4444', size=8)), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=time[current_peaks], y=clean[current_peaks], mode='markers',
+            name=labels['peaks'], marker=dict(color='#FF4444', size=8)
+        ), row=2, col=1)
     if len(current_troughs) > 0:
-        fig.add_trace(go.Scatter(x=time[current_troughs], y=clean[current_troughs], mode='markers', 
-                                 name='Diastolic/Exhale', marker=dict(color='#4444FF', size=8)), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=time[current_troughs], y=clean[current_troughs], mode='markers',
+            name=labels['troughs'], marker=dict(color='#4444FF', size=8)
+        ), row=2, col=1)
+
+    # Phase overlay on row 2 (secondary y-axis, 0-1)
+    if has_phase:
+        fig.add_trace(go.Scatter(
+            x=time, y=phase_data,
+            name='Cycle Completion',
+            line=dict(color='#2ECC71', width=1.5, dash='dot'),
+            opacity=0.8,
+        ), row=2, col=1, secondary_y=True)
+        # Determine prefix for label lookup
+        if signal_key in {'spirometer', 'spiro', 'mask flow', 'maskflow'}:
+            phase_label_key = 'spiro_phase'
+        else:
+            phase_label_key = 'rsp_phase'
+        fig.update_yaxes(
+            title_text=config.Y_AXIS_LABELS.get(phase_label_key, 'Cycle Completion'),
+            range=[0, 1.05], secondary_y=True, row=2, col=1
+        )
+        # Pin the primary (signal) y-axis so the phase axis cannot distort it
+        finite_clean = clean[np.isfinite(clean)]
+        if len(finite_clean) > 0:
+            sig_min, sig_max = np.min(finite_clean), np.max(finite_clean)
+            pad = max(0.05, (sig_max - sig_min) * 0.15)
+            fig.update_yaxes(range=[sig_min - pad, sig_max + pad], secondary_y=False, row=2, col=1)
 
     # --- Row 3: BP Metrics (SBP/MAP/DBP) or RSP Rate ---
     if is_bp_like and bp_data is not None:
+    if is_bp and bp_data is not None:
         t_4hz = bp_data['time_4hz']
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
         fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
     elif rate_interpolated is not None:
-        fig.add_trace(go.Scatter(x=time, y=rate_interpolated, name='Rate Interpolated', line=dict(color='#FF6B6B', width=2)), row=3, col=1)
+        fig.add_trace(
+            go.Scatter(x=time, y=rate_interpolated, name=labels['rate'], line=dict(color='#FF6B6B', width=2)),
+            row=3, col=1
+        )
+        # Clamp y-axis to physiological range using percentiles
+        finite_rate = rate_interpolated[np.isfinite(rate_interpolated)]
+        if len(finite_rate) > 0:
+            p1, p99 = np.percentile(finite_rate, [1, 99])
+            pad = max(2, (p99 - p1) * 0.1)
+            fig.update_yaxes(range=[max(0, p1 - pad), p99 + pad], row=3, col=1)
+
+    # --- Row 4: RVT (RSP only) ---
+    if has_rvt:
+        fig.add_trace(
+            go.Scatter(x=time, y=rvt_data, name='RVT', line=dict(color='#A78BFA', width=2)),
+            row=4, col=1
+        )
+        finite_rvt = rvt_data[np.isfinite(rvt_data)]
+        if len(finite_rvt) > 0:
+            p1, p99 = np.percentile(finite_rvt, [1, 99])
+            pad = max(0.01, (p99 - p1) * 0.1)
+            fig.update_yaxes(range=[p1 - pad, p99 + pad], row=4, col=1)
 
     # --- Row 4: Heart Rate (BP only) ---
-    if is_bp_like and hr_data is not None:
-        fig.add_trace(go.Scatter(x=time, y=hr_data['hr_interpolated'], name='HR from BP', line=dict(color='#FF6B6B', width=2)), row=4, col=1)
+    if is_bp and hr_data is not None:
+        fig.add_trace(
+            go.Scatter(x=time, y=hr_data['hr_interpolated'], name=labels['hr_from_bp'], line=dict(color='#FF6B6B', width=2)),
+            row=4, col=1
+        )
+        # Clamp y-axis for BP-derived HR
+        finite_hr = hr_data['hr_interpolated'][np.isfinite(hr_data['hr_interpolated'])]
+        if len(finite_hr) > 0:
+            p1, p99 = np.percentile(finite_hr, [1, 99])
+            pad = max(5, (p99 - p1) * 0.1)
+            fig.update_yaxes(range=[max(0, p1 - pad), p99 + pad], row=4, col=1)
+
+    # Y-axis titles
+    if is_bp:
+        prefix = 'bp'
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_raw', ''), row=1, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_peaks', ''), row=2, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_metrics', ''), row=3, col=1)
+        if n_rows >= 4:
+            fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get('bp_hr', ''), row=4, col=1)
+    else:
+        if signal_key in {'spirometer', 'spiro', 'mask flow', 'maskflow'}:
+            prefix = 'spiro'
+        else:
+            prefix = 'rsp'
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_raw', ''), row=1, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_peaks', ''), row=2, col=1)
+        fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_rate', ''), row=3, col=1)
+        if has_rvt and n_rows >= 4:
+            fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_rvt', ''), row=4, col=1)
 
     # Formatting
-    fig.update_xaxes(matches='x')
+    fig.update_xaxes(matches='x', rangemode='nonnegative')
     if zoom_range is not None:
-        fig.update_xaxes(range=[zoom_range[0], zoom_range[1]])
-    
+        fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
+
     fig.update_layout(height=height, template='plotly_dark', showlegend=True, hovermode='x unified', uirevision=ui_revision)
     fig.update_traces(connectgaps=False)
+    return fig
+
+
+def _resolve_task_key(task_name):
+    """Map a task name from filename to a TASK_EVENTS key."""
+    if not task_name:
+        return None
+    normalised = str(task_name).strip().lower().replace('-', '').replace('_', '')
+    # Exact match first
+    key = config.TASK_EVENT_ALIASES.get(normalised)
+    if key:
+        return key
+    # Substring match: check if any alias is contained in the task name
+    for alias, mapped_key in config.TASK_EVENT_ALIASES.items():
+        if alias in normalised or normalised in alias:
+            return mapped_key
+    return None
+
+
+def _format_event_time(seconds):
+    """Format seconds as m:ss for compact event labels."""
+    total = int(round(float(seconds)))
+    mins = total // 60
+    secs = total % 60
+    return f"{mins}:{secs:02d}"
+
+
+def _resolve_task_events(task_key, participant_label=None):
+    """Resolve task events with participant-specific overrides when configured."""
+    if participant_label:
+        participant_norm = str(participant_label).strip().lower()
+        for participant_prefix, per_task_overrides in config.TASK_EVENTS_PARTICIPANT_OVERRIDES.items():
+            prefix_norm = str(participant_prefix).strip().lower()
+            if participant_norm.startswith(prefix_norm):
+                override_events = per_task_overrides.get(task_key)
+                if override_events is not None:
+                    return override_events
+    return config.TASK_EVENTS.get(task_key, [])
+
+
+def add_task_event_lines(fig, task_name, max_time, session_label=None, participant_label=None):
+    """Add event boundary lines plus a readable top timeline legend."""
+    task_key = _resolve_task_key(task_name)
+    if task_key is None:
+        return fig
+    if task_key == 'sts' and session_label is not None:
+        session_a_aliases = {str(alias).strip().lower() for alias in config.SPIROMETRY_SESSION_A_ALIASES}
+        if str(session_label).strip().lower() not in session_a_aliases:
+            return fig
+    events = _resolve_task_events(task_key, participant_label=participant_label)
+    if not events:
+        return fig
+
+    visible_events = []
+    for t, label, color in events:
+        if t > max_time:
+            continue
+        visible_events.append((t, label, color))
+        # Vertical line across all subplot rows
+        fig.add_vline(
+            x=t, line_dash='dash', line_color=color,
+            line_width=1, opacity=0.5,
+        )
+
+    # Add readable labels near the top of the first subplot (inside plotting area)
+    # so they don't overlap subplot titles.
+    if visible_events:
+        sorted_events = sorted(visible_events, key=lambda e: e[0])
+        min_sep_seconds = max(15.0, float(max_time) * 0.05) if max_time else 15.0
+        label_rows = [0.96, 0.88]
+        row_idx = 0
+        prev_t = None
+
+        edge_pad_seconds = max(20.0, float(max_time) * 0.03) if max_time else 20.0
+
+        for t, label, color in sorted_events:
+            if prev_t is None or (t - prev_t) >= min_sep_seconds:
+                row_idx = 0
+            else:
+                row_idx = (row_idx + 1) % len(label_rows)
+            prev_t = t
+
+            # Keep edge labels fully visible (e.g., t=0 / last event).
+            label_xanchor = 'center'
+            if t <= edge_pad_seconds:
+                label_xanchor = 'left'
+            elif max_time and t >= (max_time - edge_pad_seconds):
+                label_xanchor = 'right'
+
+            fig.add_annotation(
+                x=t,
+                y=label_rows[row_idx],
+                xref='x',
+                yref='y domain',
+                text=f"<b>{label}</b>",
+                showarrow=False,
+                xanchor=label_xanchor,
+                yanchor='top',
+                font=dict(size=13, color=color),
+                bgcolor='rgba(14, 17, 23, 0.65)',
+                bordercolor='rgba(120,120,120,0.35)',
+                borderwidth=1,
+                borderpad=2,
+                row=1,
+                col=1,
+            )
+
+        # Build a single-line horizontal legend strip with larger font.
+        items = [
+            f"<span style='color:{color}'>●</span> {_format_event_time(t)} {label}"
+            for t, label, color in visible_events
+        ]
+        legend_text = " | ".join(items)
+
+        # Increase top margin so the single-line timeline strip sits above subplot titles.
+        current_margin_t = 0
+        if fig.layout.margin and fig.layout.margin.t is not None:
+            current_margin_t = int(fig.layout.margin.t)
+        required_margin_t = 135
+        fig.update_layout(margin=dict(t=max(current_margin_t, required_margin_t)))
+
+        fig.add_annotation(
+            x=0.01, y=1.14, xref='paper', yref='paper',
+            text=legend_text,
+            showarrow=False,
+            align='left',
+            xanchor='left', yanchor='top',
+            font=dict(size=13, color='#E6E6E6'),
+            bgcolor='rgba(14, 17, 23, 0.72)',
+            bordercolor='rgba(120,120,120,0.45)',
+            borderwidth=1,
+            borderpad=6,
+        )
     return fig
 
 
@@ -275,7 +623,11 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
 
     st.header(header_title)
 
-    col1, col2 = st.columns([2, 1])
+    is_rsp = signal_key == 'rsp'
+    if is_rsp:
+        col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 1])
+    else:
+        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
 
     with col1:
         method = st.selectbox("Cleaning Method", config.RSP_CLEANING_METHODS, key=f'{state_prefix}_method')
@@ -283,16 +635,45 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
             st.info(config.RSP_CLEANING_INFO.get(method, "No info available"))
 
     with col2:
+        peak_method = st.selectbox("Peak Detection", config.RSP_PEAK_METHODS, key=f'{state_prefix}_peak_method')
+        with st.expander("ℹ️ Peak Method Info"):
+            st.info(config.RSP_PEAK_INFO.get(peak_method, "No info available"))
+
+    with col3:
         amplitude_method = st.selectbox("Amplitude Normalization", config.RSP_AMPLITUDE_METHODS, key=f'{state_prefix}_amplitude')
         with st.expander("ℹ️ Amplitude Info"):
             st.info(config.RSP_AMPLITUDE_INFO.get(amplitude_method, "No info available"))
 
-    if st.button(f"Process {plot_label}", type="primary", key=f'process_{state_prefix}'):
+    rvt_method = 'none'
+    if is_rsp:
+        with col4:
+            rvt_method = st.selectbox("RVT Method", config.RVT_METHODS, key=f'{state_prefix}_rvt_method')
+            with st.expander("ℹ️ RVT Info"):
+                st.info(config.RVT_METHOD_INFO.get(rvt_method, "No info available"))
+        process_col = col5
+    else:
+        process_col = col4
+
+    with process_col:
+        st.write("")
+        st.write("")
+        process_clicked = st.button(
+            f"Process {plot_label}",
+            type="primary",
+            key=f'process_{state_prefix}',
+            width='stretch'
+        )
+        show_phase = st.checkbox("Show Phase", value=False, key=f'{state_prefix}_show_phase',
+                                  help="Overlay respiratory cycle completion (0→1) from trough to trough on the signal plot.")
+
+    if process_clicked:
         signal = data['df'][data['signal_mappings'][signal_key]].values
 
         params = {
             'method': method,
-            'amplitude_method': amplitude_method if amplitude_method != 'none' else None
+            'peak_method': peak_method,
+            'amplitude_method': amplitude_method if amplitude_method != 'none' else None,
+            'rvt_method': rvt_method,
         }
         st.session_state[params_state_key].update(params)
 
@@ -340,13 +721,19 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
 
         region_start_key = f'{state_prefix}_region_start'
         region_end_key = f'{state_prefix}_region_end'
+        max_t = float(time[-1])
         if region_start_key not in st.session_state:
             st.session_state[region_start_key] = 0.0
+        else:
+            st.session_state[region_start_key] = min(st.session_state[region_start_key], max_t)
         if region_end_key not in st.session_state:
-            st.session_state[region_end_key] = min(10.0, float(time[-1]))
+            st.session_state[region_end_key] = max_t
+        else:
+            st.session_state[region_end_key] = min(st.session_state[region_end_key], max_t)
 
         signal_zoom = (st.session_state[region_start_key], st.session_state[region_end_key])
 
+        phase_data = result.get('rsp_cycle_completion') if show_phase else None
         fig = create_rsp_bp_plot(
             time, result['raw'], result['clean'],
             result['current_peaks'], result['current_troughs'],
@@ -355,10 +742,20 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
             rate_interpolated=result.get('br_interpolated'),
             rate_bpm=result.get('br_bpm'),
             ui_revision=f'{state_prefix}_plot',
-            zoom_range=signal_zoom
+            zoom_range=signal_zoom,
+            rvt_data=result.get('rvt'),
+            phase_data=phase_data,
         )
+        if hasattr(st.session_state, 'task'):
+            add_task_event_lines(
+                fig,
+                st.session_state.task,
+                float(time[-1]),
+                st.session_state.get('session'),
+                st.session_state.get('participant'),
+            )
 
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         st.subheader("Drag-Based Breath Editing")
         st.write("**Quick Range Selection:**")
@@ -392,7 +789,7 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
         with col_btn5:
             if st.button("🔄 Reset Range", key=f'{state_prefix}_reset_range'):
                 st.session_state[region_start_key] = 0.0
-                st.session_state[region_end_key] = min(10.0, float(time[-1]))
+                st.session_state[region_end_key] = float(time[-1])
                 st.rerun()
 
         st.write("**Manual Range Entry:** (Or look at zoomed plot X-axis and enter values)")
@@ -427,38 +824,38 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
         st.write("**Inhalation Peaks:**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("➕ Add Inhalation Peaks", type="primary", key=f'{state_prefix}_add_peaks_btn', use_container_width=True):
+            if st.button("➕ Add Inhalation Peaks", type="primary", key=f'{state_prefix}_add_peaks_btn', width='stretch'):
                 st.session_state[result_state_key]['current_peaks'] = peak_editing.add_peaks_in_range(
                     result['clean'], result['current_peaks'], region_start, region_end, sampling_rate, min_distance_seconds=1.0
                 )
                 st.rerun()
         with col2:
-            if st.button("➖ Remove Inhalation Peaks", type="secondary", key=f'{state_prefix}_remove_peaks_btn', use_container_width=True):
+            if st.button("➖ Remove Inhalation Peaks", type="secondary", key=f'{state_prefix}_remove_peaks_btn', width='stretch'):
                 st.session_state[result_state_key]['current_peaks'] = peak_editing.erase_peaks_in_range(
                     result['current_peaks'], region_start, region_end, sampling_rate
                 )
                 st.rerun()
         with col3:
-            if st.button("🔄 Reset Inhalations", key=f'{state_prefix}_reset_peaks_btn', use_container_width=True):
+            if st.button("🔄 Reset Inhalations", key=f'{state_prefix}_reset_peaks_btn', width='stretch'):
                 st.session_state[result_state_key]['current_peaks'] = result['auto_peaks'].copy()
                 st.rerun()
 
         st.write("**Exhalation Troughs:**")
         col1, col2, col3 = st.columns(3)
         with col1:
-            if st.button("➕ Add Exhalation Troughs", type="primary", key=f'{state_prefix}_add_troughs_btn', use_container_width=True):
+            if st.button("➕ Add Exhalation Troughs", type="primary", key=f'{state_prefix}_add_troughs_btn', width='stretch'):
                 st.session_state[result_state_key]['current_troughs'] = peak_editing.add_troughs_in_range(
                     result['clean'], result['current_troughs'], region_start, region_end, sampling_rate, min_distance_seconds=1.0
                 )
                 st.rerun()
         with col2:
-            if st.button("➖ Remove Exhalation Troughs", type="secondary", key=f'{state_prefix}_remove_troughs_btn', use_container_width=True):
+            if st.button("➖ Remove Exhalation Troughs", type="secondary", key=f'{state_prefix}_remove_troughs_btn', width='stretch'):
                 st.session_state[result_state_key]['current_troughs'] = peak_editing.erase_troughs_in_range(
                     result['current_troughs'], region_start, region_end, sampling_rate
                 )
                 st.rerun()
         with col3:
-            if st.button("🔄 Reset Exhalations", key=f'{state_prefix}_reset_troughs_btn', use_container_width=True):
+            if st.button("🔄 Reset Exhalations", key=f'{state_prefix}_reset_troughs_btn', width='stretch'):
                 st.session_state[result_state_key]['current_troughs'] = result['auto_troughs'].copy()
                 st.rerun()
 
@@ -558,7 +955,7 @@ def main():
 
                 st.stop()
 
-        participants_data = scan_data_directory(config.BASE_DATA_PATH)
+        participants_data = _cached_scan_data_directory(config.BASE_DATA_PATH)
 
         if not participants_data:
             st.error(f"No data found in {config.BASE_DATA_PATH}")
@@ -607,6 +1004,11 @@ def main():
             st.session_state.eto2_result = None
             st.session_state.spo2_result = None
             st.session_state.spirometer_result = None
+
+            # Clear stale zoom/region states so they reinitialise for new data
+            for key in list(st.session_state.keys()):
+                if key.endswith('_region_start') or key.endswith('_region_end') or key.endswith('_zoom_range'):
+                    del st.session_state[key]
 
             st.success(f"Loaded {file_path}")
 
@@ -670,7 +1072,7 @@ def main():
         with tab_objects[tab_idx]:
             st.header("ECG Processing")
 
-            col1, col2 = st.columns([2, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
 
             with col1:
                 method = st.selectbox("Cleaning Method", config.ECG_CLEANING_METHODS, key='ecg_method')
@@ -709,9 +1111,17 @@ def main():
             with col2:
                 powerline = st.selectbox("Powerline Frequency", config.POWERLINE_FREQUENCIES, key='ecg_powerline')
                 correct_artifacts = st.checkbox("Artifact Correction", key='ecg_correct')
-                calculate_quality = st.checkbox("Calculate Quality", value=True, key='ecg_quality')
+                calculate_quality = st.checkbox("Calculate Quality", value=True, key='ecg_quality',
+                                                help="Compute per-beat quality scores using template matching and average QRS distance.")
+                show_ecg_phase = st.checkbox("Show Phase", value=False, key='ecg_show_phase',
+                                              help="Overlay cardiac cycle completion (0→1) from R-peak to R-peak on the signal plot.")
 
-            if st.button("Process ECG", type="primary"):
+            with col3:
+                st.write("")
+                st.write("")
+                process_ecg_clicked = st.button("Process ECG", type="primary", key='process_ecg', width='stretch')
+
+            if process_ecg_clicked:
                 signal = data['df'][data['signal_mappings']['ecg']].values
 
                 params = {
@@ -756,6 +1166,17 @@ def main():
                 quality_available = []
                 if st.session_state.ecg_params.get('calculate_quality', False):
                     st.subheader("Quality Metrics Display")
+                    with st.expander("What do the quality metrics mean?"):
+                        st.markdown(
+                            "**Template Match** — Correlates each beat's shape against the average beat. "
+                            "High values across all beats (e.g. >0.95) indicate consistent morphology; "
+                            "low values flag abnormal or noisy beats.\n\n"
+                            "**Average QRS** — Measures each beat's distance from the average QRS complex, "
+                            "scaled 0–1. 1 = closest to the average, 0 = most distant. Note: if most beats "
+                            "are poor, the average itself may be unreliable.\n\n"
+                            "**Zhao 2018** — Categorical rating (Excellent / Barely acceptable / Unacceptable) "
+                            "based on power spectrum, kurtosis, and baseline power of the QRS."
+                        )
 
                     # Continuous metrics
                     continuous_metrics = []
@@ -768,13 +1189,14 @@ def main():
                     col1, col2, col3 = st.columns(3)
                     with col1:
                         if result.get('quality_templatematch_mean') is not None:
-                            st.metric("Template Match Quality", f"{result['quality_templatematch_mean']:.3f}")
+                            st.metric("Template Match", f"{result['quality_templatematch_mean']:.3f}")
                     with col2:
                         if result.get('quality_averageqrs_mean') is not None:
-                            st.metric("Average QRS Quality", f"{result['quality_averageqrs_mean']:.3f}")
+                            st.metric("Average QRS", f"{result['quality_averageqrs_mean']:.3f}")
                     with col3:
-                        if result.get('quality_mean') is not None:
-                            st.metric("Overall Quality", f"{result['quality_mean']:.3f}")
+                        zhao = result.get('quality_zhao')
+                        if zhao is not None and zhao != "Not calculated":
+                            st.metric("Zhao 2018", str(zhao))
 
                     # Multiselect for continuous metrics
                     selected_quality_metrics = st.multiselect(
@@ -812,14 +1234,20 @@ def main():
                 }
 
                 # Initialize region range in session state if not exists (needed before plotting)
+                ecg_max_t = float(time[-1])
                 if 'ecg_region_start' not in st.session_state:
                     st.session_state.ecg_region_start = 0.0
+                else:
+                    st.session_state.ecg_region_start = min(st.session_state.ecg_region_start, ecg_max_t)
                 if 'ecg_region_end' not in st.session_state:
-                    st.session_state.ecg_region_end = min(10.0, float(time[-1]))
+                    st.session_state.ecg_region_end = ecg_max_t
+                else:
+                    st.session_state.ecg_region_end = min(st.session_state.ecg_region_end, ecg_max_t)
 
                 # Get zoom range from session state
                 ecg_zoom = (st.session_state.ecg_region_start, st.session_state.ecg_region_end)
 
+                ecg_phase_data = result.get('ecg_cardiac_cycle_completion') if show_ecg_phase else None
                 fig = create_signal_plot(
                     time, result['raw'], result['clean'],
                     result['current_r_peaks'], result['auto_r_peaks'],
@@ -829,10 +1257,18 @@ def main():
                     selected_quality_metrics=selected_quality_metrics,
                     quality_data=quality_data,
                     ui_revision='ecg_plot',  # Preserve zoom state
-                    zoom_range=ecg_zoom  # Apply zoom from region inputs
+                    zoom_range=ecg_zoom,  # Apply zoom from region inputs
+                    phase_data=ecg_phase_data,
+                )
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
                 )
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # Drag-based editing interface
                 st.subheader("Drag-Based Peak Editing")
@@ -869,7 +1305,7 @@ def main():
                 with col_btn5:
                     if st.button("🔄 Reset Range", key='ecg_reset_range'):
                         st.session_state.ecg_region_start = 0.0
-                        st.session_state.ecg_region_end = min(10.0, float(time[-1]))
+                        st.session_state.ecg_region_end = float(time[-1])
                         st.rerun()
 
                 st.write("**Manual Range Entry:** (Or look at zoomed plot X-axis and enter values)")
@@ -908,7 +1344,7 @@ def main():
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
-                    if st.button("➕ Add R-Peaks in Region", type="primary", key='ecg_add_region_btn', use_container_width=True):
+                    if st.button("➕ Add R-Peaks in Region", type="primary", key='ecg_add_region_btn', width='stretch'):
                         from utils import peak_editing
                         st.session_state.ecg_result['current_r_peaks'] = peak_editing.add_peaks_in_range(
                             result['clean'],
@@ -920,7 +1356,7 @@ def main():
                         st.rerun()
 
                 with col2:
-                    if st.button("➖ Remove R-Peaks in Region", type="secondary", key='ecg_remove_region_btn', use_container_width=True):
+                    if st.button("➖ Remove R-Peaks in Region", type="secondary", key='ecg_remove_region_btn', width='stretch'):
                         from utils import peak_editing
                         st.session_state.ecg_result['current_r_peaks'] = peak_editing.erase_peaks_in_range(
                             result['current_r_peaks'],
@@ -931,7 +1367,7 @@ def main():
                         st.rerun()
 
                 with col3:
-                    if st.button("🔄 Reset to Auto-Detected", key='ecg_reset_btn', use_container_width=True):
+                    if st.button("🔄 Reset to Auto-Detected", key='ecg_reset_btn', width='stretch'):
                         st.session_state.ecg_result['current_r_peaks'] = result['auto_r_peaks'].copy()
                         st.rerun()
 
@@ -1009,7 +1445,7 @@ def main():
         with tab_objects[tab_idx]:
             st.header("PPG Processing")
 
-            col1, col2 = st.columns([2, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
 
             with col1:
                 method = st.selectbox("Cleaning Method", config.PPG_CLEANING_METHODS, key='ppg_method')
@@ -1023,7 +1459,12 @@ def main():
             with col2:
                 correct_artifacts = st.checkbox("Artifact Correction", key='ppg_correct')
 
-            if st.button("Process PPG", type="primary"):
+            with col3:
+                st.write("")
+                st.write("")
+                process_ppg_clicked = st.button("Process PPG", type="primary", key='process_ppg', width='stretch')
+
+            if process_ppg_clicked:
                 signal = data['df'][data['signal_mappings']['ppg']].values
 
                 params = {
@@ -1075,10 +1516,15 @@ def main():
                     result['std_hr'] = 0.0
 
                 # Initialize region range in session state if not exists (needed before plotting)
+                ppg_max_t = float(time[-1])
                 if 'ppg_region_start' not in st.session_state:
                     st.session_state.ppg_region_start = 0.0
+                else:
+                    st.session_state.ppg_region_start = min(st.session_state.ppg_region_start, ppg_max_t)
                 if 'ppg_region_end' not in st.session_state:
-                    st.session_state.ppg_region_end = min(10.0, float(time[-1]))
+                    st.session_state.ppg_region_end = ppg_max_t
+                else:
+                    st.session_state.ppg_region_end = min(st.session_state.ppg_region_end, ppg_max_t)
 
                 # Get zoom range from session state
                 ppg_zoom = (st.session_state.ppg_region_start, st.session_state.ppg_region_end)
@@ -1092,8 +1538,15 @@ def main():
                     ui_revision='ppg_plot',  # Preserve zoom state
                     zoom_range=ppg_zoom  # Apply zoom from region inputs
                 )
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
+                )
 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # Drag-based editing interface
                 st.subheader("Drag-Based Peak Editing")
@@ -1130,7 +1583,7 @@ def main():
                 with col_btn5:
                     if st.button("🔄 Reset Range", key='ppg_reset_range'):
                         st.session_state.ppg_region_start = 0.0
-                        st.session_state.ppg_region_end = min(10.0, float(time[-1]))
+                        st.session_state.ppg_region_end = float(time[-1])
                         st.rerun()
 
                 st.write("**Manual Range Entry:** (Or look at zoomed plot X-axis and enter values)")
@@ -1169,7 +1622,7 @@ def main():
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
-                    if st.button("➕ Add Systolic Peaks in Region", type="primary", key='ppg_add_region_btn', use_container_width=True):
+                    if st.button("➕ Add Systolic Peaks in Region", type="primary", key='ppg_add_region_btn', width='stretch'):
                         from utils import peak_editing
                         st.session_state.ppg_result['current_peaks'] = peak_editing.add_peaks_in_range(
                             result['clean'],
@@ -1181,7 +1634,7 @@ def main():
                         st.rerun()
 
                 with col2:
-                    if st.button("➖ Remove Systolic Peaks in Region", type="secondary", key='ppg_remove_region_btn', use_container_width=True):
+                    if st.button("➖ Remove Systolic Peaks in Region", type="secondary", key='ppg_remove_region_btn', width='stretch'):
                         from utils import peak_editing
                         st.session_state.ppg_result['current_peaks'] = peak_editing.erase_peaks_in_range(
                             result['current_peaks'],
@@ -1192,7 +1645,7 @@ def main():
                         st.rerun()
 
                 with col3:
-                    if st.button("🔄 Reset to Auto-Detected", key='ppg_reset_btn', use_container_width=True):
+                    if st.button("🔄 Reset to Auto-Detected", key='ppg_reset_btn', width='stretch'):
                         st.session_state.ppg_result['current_peaks'] = result['auto_peaks'].copy()
                         st.rerun()
 
@@ -1248,7 +1701,7 @@ def main():
         with tab_objects[tab_idx]:
             st.header("Blood Pressure Processing")
 
-            col1, col2 = st.columns([2, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
 
             with col1:
                 filter_method = st.selectbox("Filter Method", config.BP_FILTER_METHODS, key='bp_filter')
@@ -1267,7 +1720,17 @@ def main():
                 else:
                     prominence = 10
 
-            if st.button("Process Blood Pressure", type="primary"):
+            with col3:
+                st.write("")
+                st.write("")
+                process_bp_clicked = st.button(
+                    "Process Blood Pressure",
+                    type="primary",
+                    key='process_bp',
+                    width='stretch'
+                )
+
+            if process_bp_clicked:
                 signal = data['df'][data['signal_mappings']['bp']].values
 
                 params = {
@@ -1324,10 +1787,15 @@ def main():
                 )
 
                 # Zoom initialization
+                bp_max_t = float(time[-1])
                 if 'bp_region_start' not in st.session_state:
                     st.session_state.bp_region_start = 0.0
+                else:
+                    st.session_state.bp_region_start = min(st.session_state.bp_region_start, bp_max_t)
                 if 'bp_region_end' not in st.session_state:
-                    st.session_state.bp_region_end = min(10.0, float(time[-1]))
+                    st.session_state.bp_region_end = bp_max_t
+                else:
+                    st.session_state.bp_region_end = min(st.session_state.bp_region_end, bp_max_t)
 
                 bp_zoom = (st.session_state.bp_region_start, st.session_state.bp_region_end)
 
@@ -1342,13 +1810,20 @@ def main():
                     ui_revision='bp_plot',
                     zoom_range=bp_zoom
                 )
-                
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
+                )
+
                 # Calibration Artifact Sidebar Info
                 calib = st.session_state.bp_result.get('calibration_artifacts')
                 if calib:
                     st.sidebar.write(f"Artifacts found: {len(calib.get('starts', []))}")
                 
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width='stretch')
 
                 # --- 3. Statistics Section ---
                 st.subheader("Statistics")
@@ -1372,7 +1847,7 @@ def main():
         with tab_objects[tab_idx]:
             st.header("End-Tidal CO2 (ETCO2) Processing")
     
-            col1, col2 = st.columns([2, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
     
             with col1:
                 # Peak detection method selection
@@ -1454,35 +1929,44 @@ def main():
                         help="Use 25th percentile of detected prominences as adaptive minimum"
                     )
     
-            with col2:
-                if st.button("🔬 Process ETCO2", type="primary", key='process_etco2'):
-                    # Update parameters
-                    params = {
-                        'peak_method': peak_method,
-                        'min_peak_distance_s': min_peak_distance_s,
-                        'min_prominence': min_prominence,
-                        'smooth_peaks': smooth_peaks,
-                        'sg_window_s': sg_window_s,
-                        'sg_poly': sg_poly,
-                        'prom_adapt': prom_adapt
-                    }
-                    st.session_state.etco2_params.update(params)
-    
-                    # Get CO2 signal
-                    co2_signal = data['df'][data['signal_mappings']['etco2']].values
-    
-                    # Process
-                    with st.spinner("Detecting CO2 peaks and extracting envelope..."):
-                        result = etco2.extract_etco2_envelope(
-                            co2_signal,
-                            sampling_rate,
-                            st.session_state.etco2_params
-                        )
-    
-                    if result is not None:
-                        st.session_state.etco2_result = result
-                        st.success(f"✅ ETCO2 processed: {len(result['auto_peaks'])} peaks detected")
-                        st.rerun()
+            with col3:
+                st.write("")
+                st.write("")
+                process_etco2_clicked = st.button(
+                    "Process ETCO2",
+                    type="primary",
+                    key='process_etco2',
+                    width='stretch'
+                )
+
+            if process_etco2_clicked:
+                # Update parameters
+                params = {
+                    'peak_method': peak_method,
+                    'min_peak_distance_s': min_peak_distance_s,
+                    'min_prominence': min_prominence,
+                    'smooth_peaks': smooth_peaks,
+                    'sg_window_s': sg_window_s,
+                    'sg_poly': sg_poly,
+                    'prom_adapt': prom_adapt
+                }
+                st.session_state.etco2_params.update(params)
+
+                # Get CO2 signal
+                co2_signal = data['df'][data['signal_mappings']['etco2']].values
+
+                # Process
+                with st.spinner("Detecting CO2 peaks and extracting envelope..."):
+                    result = etco2.process_etco2(
+                        co2_signal,
+                        sampling_rate,
+                        st.session_state.etco2_params
+                    )
+
+                if result is not None:
+                    st.session_state.etco2_result = result
+                    st.success(f"✅ ETCO2 processed: {len(result['auto_peaks'])} peaks detected")
+                    st.rerun()
     
             # Display results if available
             result = st.session_state.etco2_result
@@ -1510,7 +1994,10 @@ def main():
                 # Create plotly figure
                 fig = make_subplots(
                     rows=2, cols=1,
-                    subplot_titles=('Raw CO2 Signal with Detected Peaks', 'ETCO2 Upper Envelope'),
+                    subplot_titles=(
+                        'Raw End-Tidal CO2 Waveform with Peak Markers',
+                        'ETCO2 Envelope (Breath-Wise Maxima)'
+                    ),
                     vertical_spacing=0.12,
                     row_heights=[0.55, 0.45]
                 )
@@ -1585,22 +2072,31 @@ def main():
                 )
     
                 # Layout
-                fig.update_xaxes(title_text="Time (s)", row=2, col=1)
-                fig.update_yaxes(title_text="CO2 (mmHg)", row=1, col=1)
-                fig.update_yaxes(title_text="ETCO2 (mmHg)", row=2, col=1)
-    
+                fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
+                fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_raw'], row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_envelope'], row=2, col=1)
+
                 fig.update_layout(
                     height=800,
                     template='plotly_dark',
                     showlegend=True,
                     hovermode='x unified'
                 )
-    
+
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
+                )
+
                 # Apply zoom if set
                 if st.session_state.etco2_zoom_range is not None:
-                    fig.update_xaxes(range=st.session_state.etco2_zoom_range)
-    
-                st.plotly_chart(fig, use_container_width=True, key='etco2_plot')
+                    fig.update_xaxes(range=[max(0, st.session_state.etco2_zoom_range[0]), st.session_state.etco2_zoom_range[1]])
+
+                st.plotly_chart(fig, width='stretch', key='etco2_plot')
     
                 # Manual editing interface
                 with st.expander("✏️ Manual Peak Editing"):
@@ -1680,7 +2176,7 @@ def main():
         with tab_objects[tab_idx]:
             st.header("End-Tidal O2 (ETO2) Processing")
     
-            col1, col2 = st.columns([2, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
     
             with col1:
                 # Trough detection method selection
@@ -1762,35 +2258,44 @@ def main():
                         help="Use 25th percentile of detected prominences as adaptive minimum"
                     )
     
-            with col2:
-                if st.button("🔬 Process ETO2", type="primary", key='process_eto2'):
-                    # Update parameters
-                    params = {
-                        'trough_method': trough_method,
-                        'min_trough_distance_s': min_trough_distance_s,
-                        'min_prominence': min_prominence,
-                        'smooth_troughs': smooth_troughs,
-                        'sg_window_s': sg_window_s,
-                        'sg_poly': sg_poly,
-                        'prom_adapt': prom_adapt
-                    }
-                    st.session_state.eto2_params.update(params)
-    
-                    # Get O2 signal
-                    o2_signal = data['df'][data['signal_mappings']['eto2']].values
-    
-                    # Process
-                    with st.spinner("Detecting O2 troughs and extracting envelope..."):
-                        result = eto2.extract_eto2_envelope(
-                            o2_signal,
-                            sampling_rate,
-                            st.session_state.eto2_params
-                        )
-    
-                    if result is not None:
-                        st.session_state.eto2_result = result
-                        st.success(f"✅ ETO2 processed: {len(result['auto_troughs'])} troughs detected")
-                        st.rerun()
+            with col3:
+                st.write("")
+                st.write("")
+                process_eto2_clicked = st.button(
+                    "Process ETO2",
+                    type="primary",
+                    key='process_eto2',
+                    width='stretch'
+                )
+
+            if process_eto2_clicked:
+                # Update parameters
+                params = {
+                    'trough_method': trough_method,
+                    'min_trough_distance_s': min_trough_distance_s,
+                    'min_prominence': min_prominence,
+                    'smooth_troughs': smooth_troughs,
+                    'sg_window_s': sg_window_s,
+                    'sg_poly': sg_poly,
+                    'prom_adapt': prom_adapt
+                }
+                st.session_state.eto2_params.update(params)
+
+                # Get O2 signal
+                o2_signal = data['df'][data['signal_mappings']['eto2']].values
+
+                # Process
+                with st.spinner("Detecting O2 troughs and extracting envelope..."):
+                    result = eto2.process_eto2(
+                        o2_signal,
+                        sampling_rate,
+                        st.session_state.eto2_params
+                    )
+
+                if result is not None:
+                    st.session_state.eto2_result = result
+                    st.success(f"✅ ETO2 processed: {len(result['auto_troughs'])} troughs detected")
+                    st.rerun()
     
             # Display results if available
             result = st.session_state.eto2_result
@@ -1818,7 +2323,10 @@ def main():
                 # Create plotly figure
                 fig = make_subplots(
                     rows=2, cols=1,
-                    subplot_titles=('Raw O2 Signal with Detected Troughs', 'ETO2 Lower Envelope'),
+                    subplot_titles=(
+                        'Raw End-Tidal O2 Waveform with Trough Markers',
+                        'ETO2 Envelope (Breath-Wise Minima)'
+                    ),
                     vertical_spacing=0.12,
                     row_heights=[0.55, 0.45]
                 )
@@ -1893,22 +2401,31 @@ def main():
                 )
     
                 # Layout
-                fig.update_xaxes(title_text="Time (s)", row=2, col=1)
-                fig.update_yaxes(title_text="O2 (mmHg)", row=1, col=1)
-                fig.update_yaxes(title_text="ETO2 (mmHg)", row=2, col=1)
-    
+                fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
+                fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_raw'], row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_envelope'], row=2, col=1)
+
                 fig.update_layout(
                     height=800,
                     template='plotly_dark',
                     showlegend=True,
                     hovermode='x unified'
                 )
-    
+
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
+                )
+
                 # Apply zoom if set
                 if st.session_state.eto2_zoom_range is not None:
-                    fig.update_xaxes(range=st.session_state.eto2_zoom_range)
-    
-                st.plotly_chart(fig, use_container_width=True, key='eto2_plot')
+                    fig.update_xaxes(range=[max(0, st.session_state.eto2_zoom_range[0]), st.session_state.eto2_zoom_range[1]])
+
+                st.plotly_chart(fig, width='stretch', key='eto2_plot')
     
                 # Manual editing interface
                 with st.expander("✏️ Manual Trough Editing"):
@@ -1985,7 +2502,7 @@ def main():
         with tab_objects[tab_idx]:
             st.header("SpO2 (Oxygen Saturation) Processing")
 
-            col1, col2 = st.columns([2, 1])
+            col1, col2, col3 = st.columns([2, 1, 1])
 
             with col1:
                 # Cleaning method selection
@@ -2075,36 +2592,40 @@ def main():
                         help="Minimum duration for a desaturation event"
                     )
 
-            with col2:
-                if st.button("Process SpO2", type="primary", key='process_spo2'):
-                    # Update parameters
-                    params = {
-                        'cleaning_method': cleaning_method,
-                        'lowpass_cutoff': lowpass_cutoff,
-                        'filter_order': filter_order,
-                        'sg_window_s': sg_window_s,
-                        'sg_poly': sg_poly,
-                        'desaturation_threshold': desaturation_threshold,
-                        'min_event_duration_s': min_event_duration_s
-                    }
-                    st.session_state.spo2_params.update(params)
+            with col3:
+                st.write("")
+                st.write("")
+                process_spo2_clicked = st.button("Process SpO2", type="primary", key='process_spo2', width='stretch')
 
-                    # Get SpO2 signal
-                    spo2_signal = data['df'][data['signal_mappings']['spo2']].values
+            if process_spo2_clicked:
+                # Update parameters
+                params = {
+                    'cleaning_method': cleaning_method,
+                    'lowpass_cutoff': lowpass_cutoff,
+                    'filter_order': filter_order,
+                    'sg_window_s': sg_window_s,
+                    'sg_poly': sg_poly,
+                    'desaturation_threshold': desaturation_threshold,
+                    'min_event_duration_s': min_event_duration_s
+                }
+                st.session_state.spo2_params.update(params)
 
-                    # Process
-                    with st.spinner("Processing SpO2 signal..."):
-                        result = spo2.process_spo2(
-                            spo2_signal,
-                            sampling_rate,
-                            st.session_state.spo2_params
-                        )
+                # Get SpO2 signal
+                spo2_signal = data['df'][data['signal_mappings']['spo2']].values
 
-                    if result is not None:
-                        st.session_state.spo2_result = result
-                        metrics = result['metrics']
-                        st.success(f"SpO2 processed: Mean {metrics['mean_spo2']:.1f}%")
-                        st.rerun()
+                # Process
+                with st.spinner("Processing SpO2 signal..."):
+                    result = spo2.process_spo2(
+                        spo2_signal,
+                        sampling_rate,
+                        st.session_state.spo2_params
+                    )
+
+                if result is not None:
+                    st.session_state.spo2_result = result
+                    metrics = result['metrics']
+                    st.success(f"SpO2 processed: Mean {metrics['mean_spo2']:.1f}%")
+                    st.rerun()
 
             # Display results if available
             result = st.session_state.spo2_result
@@ -2140,7 +2661,10 @@ def main():
                 # Create plotly figure
                 fig = make_subplots(
                     rows=2, cols=1,
-                    subplot_titles=('Raw vs Cleaned SpO2', 'SpO2 with Thresholds'),
+                    subplot_titles=(
+                        'Raw vs Cleaned SpO2 Waveform',
+                        'Cleaned SpO2 with Clinical Thresholds and Desaturation Events'
+                    ),
                     vertical_spacing=0.12,
                     row_heights=[0.45, 0.55]
                 )
@@ -2183,13 +2707,15 @@ def main():
                 )
 
                 # Add threshold lines
+                desat_line = float(st.session_state.spo2_params.get('desaturation_threshold', desaturation_threshold))
+                reference_line = desat_line + 5.0
                 fig.add_hline(
-                    y=90, line_dash="dash", line_color="red",
-                    annotation_text="90%", row=2, col=1
+                    y=desat_line, line_dash="dash", line_color="red",
+                    annotation_text=f"{desat_line:.0f}%", row=2, col=1
                 )
                 fig.add_hline(
-                    y=95, line_dash="dash", line_color="yellow",
-                    annotation_text="95%", row=2, col=1
+                    y=reference_line, line_dash="dash", line_color="yellow",
+                    annotation_text=f"{reference_line:.0f}%", row=2, col=1
                 )
 
                 # Highlight desaturation events
@@ -2204,9 +2730,26 @@ def main():
                     )
 
                 # Layout
-                fig.update_xaxes(title_text="Time (s)", row=2, col=1)
-                fig.update_yaxes(title_text="SpO2 (%)", row=1, col=1)
-                fig.update_yaxes(title_text="SpO2 (%)", row=2, col=1, range=[80, 105])
+                fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
+                fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_raw'], row=1, col=1)
+                # Dynamic SpO2 axis limits to avoid hard-coded lower bounds.
+                spo2_clean = np.asarray(result['cleaned_signal'], dtype=float)
+                finite_spo2 = spo2_clean[np.isfinite(spo2_clean)]
+                if len(finite_spo2) > 0:
+                    p1, p99 = np.percentile(finite_spo2, [1, 99])
+                    desat_thr = float(st.session_state.spo2_params.get('desaturation_threshold', 90.0))
+                    ref_thr = desat_thr + 5.0
+                    lower_anchor = min(p1, desat_thr, ref_thr)
+                    upper_anchor = max(p99, desat_thr, ref_thr)
+                    pad = max(0.5, (upper_anchor - lower_anchor) * 0.08)
+                    y_min = max(0.0, lower_anchor - pad)
+                    y_max = upper_anchor + pad
+                    if y_max - y_min < 2.0:
+                        y_max = y_min + 2.0
+                    fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_clean'], row=2, col=1, range=[y_min, y_max])
+                else:
+                    fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_clean'], row=2, col=1)
 
                 fig.update_layout(
                     height=700,
@@ -2215,11 +2758,19 @@ def main():
                     hovermode='x unified'
                 )
 
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
+                )
+
                 # Apply zoom if set
                 if st.session_state.spo2_zoom_range is not None:
-                    fig.update_xaxes(range=st.session_state.spo2_zoom_range)
+                    fig.update_xaxes(range=[max(0, st.session_state.spo2_zoom_range[0]), st.session_state.spo2_zoom_range[1]])
 
-                st.plotly_chart(fig, use_container_width=True, key='spo2_plot')
+                st.plotly_chart(fig, width='stretch', key='spo2_plot')
 
                 # Zoom controls
                 with st.expander("Zoom Controls"):
@@ -2266,7 +2817,7 @@ def main():
                                 'Duration (s)': f"{(end_idx - start_idx) / sampling_rate:.1f}",
                                 'Min SpO2 (%)': f"{min_val:.1f}"
                             })
-                        st.dataframe(events_data, use_container_width=True)
+                        st.dataframe(events_data, width='stretch')
 
             else:
                 st.info("Configure parameters above and click 'Process SpO2' to begin")
@@ -2457,6 +3008,18 @@ def main():
 
             if st.button("Export All Signals", type="primary"):
                 results_dict, params_dict = {}, {}
+
+                if st.session_state.ecg_result is not None:
+                    results_dict['ecg'] = st.session_state.ecg_result
+                    params_dict['ecg'] = st.session_state.ecg_params
+
+                if st.session_state.rsp_result is not None:
+                    results_dict['rsp'] = st.session_state.rsp_result
+                    params_dict['rsp'] = st.session_state.rsp_params
+
+                if st.session_state.ppg_result is not None:
+                    results_dict['ppg'] = st.session_state.ppg_result
+                    params_dict['ppg'] = st.session_state.ppg_params
 
                 if st.session_state.bp_result is not None:
                     from metrics.blood_pressure import calculate_bp_metrics

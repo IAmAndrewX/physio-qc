@@ -150,6 +150,14 @@ RSP_CLEANING_INFO = {
     'custom': 'Apply user-specified bandpass/lowpass/highpass filters (Butterworth, FIR, etc.)'
 }
 
+RSP_PEAK_METHODS = ['scipy', 'khodadad2018', 'biosppy']
+
+RSP_PEAK_INFO = {
+    'scipy': 'Scipy find_peaks - simple prominence-based peak detection (default)',
+    'khodadad2018': 'Khodadad et al. (2018) - Optimised breath detection from impedance tomography',
+    'biosppy': 'BioSPPy resp() parameters - zero-crossing based detection',
+}
+
 RSP_AMPLITUDE_METHODS = ['robust', 'standardize', 'minmax', 'none']
 
 RSP_AMPLITUDE_INFO = {
@@ -159,8 +167,18 @@ RSP_AMPLITUDE_INFO = {
     'none': 'No normalization - Use original signal amplitude'
 }
 
+RVT_METHODS = ['none', 'power2020', 'harrison2021', 'birn2006']
+
+RVT_METHOD_INFO = {
+    'none': 'Disable RVT computation',
+    'power2020': 'Power et al. (2020) - Breath-volume normalized by breath duration, interpolated to signal length',
+    'harrison2021': 'Harrison et al. (2021) - Hilbert-transform envelope approach for continuous RVT estimation',
+    'birn2006': 'Birn et al. (2006) - Classic RVT: peak-to-trough amplitude divided by breath period',
+}
+
 DEFAULT_RSP_PARAMS = {
     'method': 'khodadad2018',
+    'peak_method': 'scipy',
     'rate_method': 'monotone_cubic',
     'amplitude_method': 'robust',
     'lowcut': 0.05,
@@ -168,7 +186,8 @@ DEFAULT_RSP_PARAMS = {
     'filter_type': 'butterworth',
     'filter_order': 5,
     'apply_lowcut': True,
-    'apply_highcut': True
+    'apply_highcut': True,
+    'rvt_method': 'none'
 }
 
 # =============================================================================
@@ -368,6 +387,127 @@ DEFAULT_SPO2_PARAMS = {
     'desaturation_threshold': 90.0,  # % - clinical threshold
     'desaturation_drop': 3.0,  # % drop from baseline for event
     'min_event_duration_s': 10.0  # minimum duration for desaturation event
+}
+
+# =============================================================================
+# TASK EVENT PROTOCOLS (vertical line annotations on plots)
+# =============================================================================
+# Each entry: (time_in_seconds, label, hex_color)
+# Timings are from protocol start (t=0 at recording start).
+
+TASK_EVENTS = {
+    # Breathing task (9 min = 540 s)
+    # Sequence: [Baseline-Fast-Baseline-Slow] x2 + Final Baseline
+    'breath': [
+        (0,   'Baseline',       '#888888'),
+        (60,  'Fast Breathing', '#FF9F43'),
+        (120, 'Baseline',       '#888888'),
+        (180, 'Slow Breathing', '#54A0FF'),
+        (240, 'Baseline',       '#888888'),
+        (300, 'Fast Breathing', '#FF9F43'),
+        (360, 'Baseline',       '#888888'),
+        (420, 'Slow Breathing', '#54A0FF'),
+        (480, 'Baseline',       '#888888'),
+    ],
+    # Gas challenge (12 min = 720 s)
+    # Use simple condition labels for consistency: Air / Hypercapnia / Hypoxia
+    'gas': [
+        (0,   'Air',         '#888888'),
+        (60,  'Hypercapnia', '#FF6B6B'),
+        (180, 'Air',         '#1DD1A1'),
+        (300, 'Hypoxia',     '#A78BFA'),
+        (480, 'Air',         '#1DD1A1'),
+        (720, 'Gas Off',     '#F8F9FA'),
+    ],
+    # Rest (8 min = 480 s) — no mid-task events
+    'rest': [],
+    # STS (Session 1): 0-5 min supine, then stand at 5 min
+    'sts': [
+        (0,   'Supine', '#54A0FF'),
+        (300, 'Stand',  '#FF6B6B'),
+    ],
+}
+
+# Participant-specific task protocol overrides.
+# Keys are participant prefixes (lowercase), values are {task_key: events}.
+#
+# sub-00 gas challenge protocol (operator table / screenshot):
+# Total timeline = 1140 s with repeated Hypercapnia/Hypoxia blocks.
+# Keep naming aligned to default gas labels (Air / Hypercapnia / Hypoxia).
+TASK_EVENTS_PARTICIPANT_OVERRIDES = {
+    'sub-00': {
+        'gas': [
+            (0,    'Air',         '#888888'),
+            (60,   'Hypercapnia', '#FF6B6B'),
+            (180,  'Air',         '#1DD1A1'),
+            (240,  'Hypoxia',     '#A78BFA'),
+            (420,  'Air',         '#1DD1A1'),
+            (600,  'Hypercapnia', '#FF6B6B'),
+            (720,  'Air',         '#1DD1A1'),
+            (780,  'Hypoxia',     '#A78BFA'),
+            (960,  'Air',         '#1DD1A1'),
+            (1140, 'Gas Off',     '#F8F9FA'),
+        ],
+    },
+}
+
+# Map task names from filenames to protocol keys
+# Normalised: lowered, stripped of hyphens/underscores
+TASK_EVENT_ALIASES = {
+    'breath':       'breath',
+    'breathing':    'breath',
+    'breathe':      'breath',
+    'gas':          'gas',
+    'gaschallenge': 'gas',
+    'rest':         'rest',
+    'resting':      'rest',
+    'sts':          'sts',
+    'sittostand':   'sts',
+    'stand':        'sts',
+}
+
+# =============================================================================
+# Y-AXIS LABELS (edit these to change axis titles across all plots)
+# =============================================================================
+
+Y_AXIS_LABELS = {
+    # ECG
+    'ecg_raw': 'Amplitude (mV)',
+    'ecg_clean': 'Amplitude (mV)',
+    'ecg_peaks': 'Amplitude (mV)',
+    'ecg_hr': 'Heart Rate (BPM)',
+    'ecg_phase': 'Cycle Completion',
+    # RSP
+    'rsp_raw': 'Amplitude (a.u.)',
+    'rsp_clean': 'Amplitude (a.u.)',
+    'rsp_peaks': 'Amplitude (a.u.)',
+    'rsp_rate': 'Breathing Rate (breaths/min)',
+    'rsp_rvt': 'RVT (a.u.)',
+    'rsp_phase': 'Cycle Completion',
+    # Spirometer
+    'spiro_raw': 'Flow (a.u.)',
+    'spiro_clean': 'Flow (a.u.)',
+    'spiro_peaks': 'Flow (a.u.)',
+    'spiro_rate': 'Breathing Rate (breaths/min)',
+    'spiro_phase': 'Cycle Completion',
+    # PPG
+    'ppg_raw': 'Amplitude (a.u.)',
+    'ppg_clean': 'Amplitude (a.u.)',
+    'ppg_peaks': 'Amplitude (a.u.)',
+    'ppg_hr': 'Pulse Rate (BPM)',
+    # BP
+    'bp_raw': 'Pressure (mmHg)',
+    'bp_filtered': 'Pressure (mmHg)',
+    'bp_peaks': 'Pressure (mmHg)',
+    'bp_metrics': 'Pressure (mmHg)',
+    'bp_hr': 'Heart Rate (BPM)',
+    # Gas channels
+    'etco2_raw': 'CO2 (mmHg)',
+    'etco2_envelope': 'ETCO2 (mmHg)',
+    'eto2_raw': 'O2 (mmHg)',
+    'eto2_envelope': 'ETO2 (mmHg)',
+    'spo2_raw': 'SpO2 (%)',
+    'spo2_clean': 'SpO2 (%)',
 }
 
 # =============================================================================

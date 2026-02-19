@@ -3,9 +3,6 @@ Conversions for physiological signals
 Handles unit conversions like volts to mmHg for gas analyzer channels
 """
 
-import pandas as pd
-import numpy as np
-
 
 def convert_voltage_to_mmhg_o2(voltage_signal):
     """
@@ -119,7 +116,7 @@ def convert_gas_channels(df, co2_channel=None, o2_channel=None):
     if co2_channel is None:
         for col in df.columns:
             col_lower = col.lower()
-            if 'a 8' in col_lower or 'a8' in col_lower:
+            if "a 8" in col_lower or "a8" in col_lower:
                 co2_channel = col
                 break
 
@@ -127,7 +124,7 @@ def convert_gas_channels(df, co2_channel=None, o2_channel=None):
     if o2_channel is None:
         for col in df.columns:
             col_lower = col.lower()
-            if 'a 7' in col_lower or 'a7' in col_lower:
+            if "a 7" in col_lower or "a7" in col_lower:
                 o2_channel = col
                 break
 
@@ -141,16 +138,16 @@ def convert_gas_channels(df, co2_channel=None, o2_channel=None):
 
     # Convert CO2 if channel found
     if co2_channel and co2_channel in df.columns:
-        df['CO2(mmHg)'] = convert_voltage_to_mmhg_co2(df[co2_channel])
-        conversions['co2'] = 'CO2(mmHg)'
+        df["CO2(mmHg)"] = convert_voltage_to_mmhg_co2(df[co2_channel])
+        conversions["co2"] = "CO2(mmHg)"
 
     # Convert O2 if channel found (Pct vs Volts based on value range)
     if o2_channel and o2_channel in df.columns:
         if o2_is_pct:
-            df['O2(mmHg)'] = convert_pct_to_mmhg_o2(df[o2_channel])
+            df["O2(mmHg)"] = convert_pct_to_mmhg_o2(df[o2_channel])
         else:
-            df['O2(mmHg)'] = convert_voltage_to_mmhg_o2(df[o2_channel])
-        conversions['o2'] = 'O2(mmHg)'
+            df["O2(mmHg)"] = convert_voltage_to_mmhg_o2(df[o2_channel])
+        conversions["o2"] = "O2(mmHg)"
 
     return df, conversions
 

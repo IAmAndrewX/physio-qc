@@ -342,8 +342,113 @@ def delineate_bp(signal, fs, do_filter=True, filter_cutoff_hz=25.0, smooth_win_s
 
         diff_index = temp_index + 1
 
+
+
+    # ==========================================================
+    # NEW: BEAT-BOUNDED PEAK REFINEMENT 
+    # Fixes the "local maxima" issue by forcing the peak to be
+    # the absolute highest point between two consecutive troughs.
+    # ==========================================================
+    refined_peakp = []
+    
+    for i in range(len(peakp)):
+        start_idx = onsetp[i]
+        
+        # Define the end of the search window (the next trough)
+        if i < len(peakp) - 1:
+            end_idx = onsetp[i+1]
+        else:
+            # For the very last beat, search ahead by an average beat duration 
+            # or up to the end of the signal
+            avg_beat_len = int(np.median(np.diff(onsetp))) if len(onsetp) > 1 else int(fs)
+            end_idx = min(n, start_idx + avg_beat_len)
+
+        # Extract the beat window from the smoothed signal
+        beat_window = x[start_idx:end_idx]
+        
+        if len(beat_window) > 0:
+            # Find the absolute maximum within this specific beat
+            true_peak_idx = start_idx + int(np.argmax(beat_window))
+            refined_peakp.append(true_peak_idx)
+        else:
+            # Fallback if windowing fails
+            refined_peakp.append(peakp[i])
+            
+    # Overwrite the original delineator peaks
+    peakp = refined_peakp
+
+# ==========================================================
+    # NEW: MINIMUM DISTANCE ENFORCEMENT (0.4 seconds)
+    # Drops beats that occur too close to the previous valid beat.
+    # ==========================================================
+    # ==========================================================
+    # NEW: ROBUST MINIMUM DISTANCE ENFORCEMENT (0.4 seconds)
+    # Checks peak-to-peak distance. If too close, keeps the larger peak.
+    # ==========================================================
+    # FINAL: BEAT REFINEMENT (Amplitude + Distance + Pair Deletion)
+    # ==========================================================
+    if len(peakp) == 0:
+        return np.array([], dtype=int), np.array([], dtype=int), np.array([], dtype=int)
+
+    # 1. Calculate amplitudes of every detected pair (including the false ones)
+    beat_amps = []
+    for i in range(len(peakp)):
+        beat_amps.append(x[peakp[i]] - x[onsetp[i]])
+    
+    # 2. Use 75th percentile to ignore the tiny false bumps when finding the "Average True Size"
+    true_size_ref = np.percentile(beat_amps, 75) if len(beat_amps) > 0 else 1.0
+    min_amp_thresh = 0.25 * true_size_ref  # Must be >= 25% of a normal true pulse
+
+    min_dist_samples = int(0.35 * fs) 
+    
+    final_onsetp = []
+    final_peakp = []
+    final_dicron = []
+    
+    for i in range(len(peakp)):
+        start_idx = onsetp[i]  # <-- This is the Trough
+        d_val = dicron[i] if i < len(dicron) else 0
+        
+        # A. Beat-Bounded Peak Refinement
+        if i < len(peakp) - 1:
+            end_idx = onsetp[i+1]
+        else:
+            avg_beat = int(np.median(np.diff(onsetp))) if len(onsetp) > 1 else int(fs)
+            end_idx = min(n, start_idx + avg_beat)
+
+        beat_window = x[start_idx:end_idx]
+        if len(beat_window) > 0:
+            true_peak_idx = start_idx + int(np.argmax(beat_window))
+        else:
+            true_peak_idx = peakp[i]
+            
+        # B. AMPLITUDE CHECK (The Trash Can)
+        amp = x[true_peak_idx] - x[start_idx]
+        if amp < min_amp_thresh:
+            # SKIP! Both the false peak AND the false trough are abandoned right here.
+            continue 
+            
+        # C. Distance / Refractory Check
+        if len(final_peakp) == 0:
+            final_onsetp.append(start_idx)
+            final_peakp.append(true_peak_idx)
+            final_dicron.append(d_val)
+        else:
+            peak_dist = true_peak_idx - final_peakp[-1]
+            if peak_dist < min_dist_samples:
+                # AMPLITUDE CONTEST
+                if x[true_peak_idx] > x[final_peakp[-1]]:
+                    final_onsetp[-1] = start_idx
+                    final_peakp[-1] = true_peak_idx
+                    final_dicron[-1] = d_val
+            else:
+                final_onsetp.append(start_idx)
+                final_peakp.append(true_peak_idx)
+                final_dicron.append(d_val)
+    # ==========================================================
+
     return {
-        'onsets': np.asarray(onsetp, dtype=int),
-        'peaks': np.asarray(peakp, dtype=int),
-        'dicrotic_notches': np.asarray(dicron, dtype=int)
+        'onsets': np.asarray(final_onsetp, dtype=int),
+        'peaks': np.asarray(final_peakp, dtype=int),
+        'dicrotic_notches': np.asarray(final_dicron, dtype=int)
     }

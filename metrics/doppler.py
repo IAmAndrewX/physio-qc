@@ -16,45 +16,142 @@ import config
 from algorithms.bp_delineator import delineate_bp  # reuse BP delineator for Doppler (as requested)
 
 
+import numpy as np
+from scipy.signal import bessel, butter, filtfilt, find_peaks, savgol_filter
+import scipy.ndimage
+import scipy.interpolate
+import neurokit2 as nk
+
+try:
+    import pywt
+except ImportError:
+    pywt = None
+
+import config
+from algorithms.bp_delineator import delineate_bp
+
 # ============================================================
 # Filtering
 # ============================================================
 
-def filter_doppler(signal, sampling_rate, method='bessel_25hz', filter_order=3,
+def get_robust_trend(data, fs, trend_win_s=2.0):
+    sigma = (trend_win_s * fs) / 2.0
+    return scipy.ndimage.gaussian_filter(data, sigma=sigma)
+
+def wavelet_denoise_iqr(data, wavelet="db6", level=10, iqr_alpha=4.0, drop_levels=1):
+    if pywt is None:
+        return data # Fallback if not installed
+        
+    data = np.asarray(data).ravel()
+    n = len(data)
+    max_level = pywt.dwt_max_level(n, pywt.Wavelet(wavelet).dec_len)
+    
+    level = min(level, max_level) if level > 0 else min(10, max_level)
+    coeffs = pywt.wavedec(data, wavelet, level=level, mode='symmetric')
+    coeffs_cleaned = []
+
+    for i, c in enumerate(coeffs):
+        current_detail = level - (i - 1) if i > 0 else 0
+        
+        if i == 0: # Approx
+            coeffs_cleaned.append(c)
+            continue
+        if current_detail <= drop_levels: # Drop fine details
+            coeffs_cleaned.append(np.zeros_like(c))
+            continue
+
+        # IQR cleaning
+        q1, q3 = np.quantile(c, [0.25, 0.75])
+        iqr = q3 - q1
+        lo, hi = q1 - iqr_alpha*iqr, q3 + iqr_alpha*iqr
+        
+        c_fixed = c.copy()
+        c_fixed[(c < lo) | (c > hi)] = 0.0
+        coeffs_cleaned.append(c_fixed)
+
+    return pywt.waverec(coeffs_cleaned, wavelet, mode='symmetric')[:n]
+
+def extract_template_and_score(sig, troughs, target_len=100):
+    """Shift-invariant correlation scoring."""
+    beats_norm = []
+    
+    for i in range(len(troughs) - 1):
+        start, end = troughs[i], troughs[i+1]
+        length = end - start
+        if length < 10 or length > 5000: continue
+            
+        segment = sig[start:end]
+        
+        # Resample
+        x_old = np.linspace(0, 1, num=length)
+        x_new = np.linspace(0, 1, num=target_len)
+        f = scipy.interpolate.interp1d(x_old, segment, kind='linear')
+        seg_resampled = f(x_new)
+        
+        # Z-Score (Automatically handles DC offset/baseline drift)
+        std_val = np.std(seg_resampled)
+        if std_val > 1e-9:
+            seg_norm = (seg_resampled - np.mean(seg_resampled)) / std_val
+        else:
+            seg_norm = seg_resampled - np.mean(seg_resampled)
+        
+        beats_norm.append(seg_norm)
+
+    if not beats_norm: return [], []
+    
+    beats_matrix = np.array(beats_norm) 
+    template = np.mean(beats_matrix, axis=0)
+    
+    scores = []
+    max_shift = 5 
+    for beat in beats_matrix:
+        best_corr = -1.0
+        for shift in range(-max_shift, max_shift + 1):
+            shifted_beat = np.roll(beat, shift)
+            corr = np.corrcoef(template, shifted_beat)[0, 1]
+            if corr > best_corr: best_corr = corr
+        scores.append(max(0, best_corr))
+        
+    return template, scores
+
+
+# ============================================================
+# Filtering & Pipeline Updates
+# ============================================================
+
+
+def filter_doppler(signal, sampling_rate, method='sg_wavelet', filter_order=3,
                    cutoff_freq=25, filter_type='butterworth', lowcut=0.5, highcut=15.0,
-                   apply_lowcut=True, apply_highcut=True):
+                   apply_lowcut=True, apply_highcut=True,
+                   sg_win=0.1, wavelet='db6', level=10, alpha=4.0, drop_levels=1, trend_win=2.0, **kwargs):
     """
     Filter Doppler signal
-
-    Parameters
-    ----------
-    signal : array
-        Raw Doppler signal
-    sampling_rate : int
-        Sampling rate in Hz
-    method : str
-        Filtering method ('bessel_25hz', 'butterworth', 'custom')
-    filter_order : int
-        Filter order
-    cutoff_freq : float
-        Cutoff frequency for lowpass methods (Hz)
-    filter_type : str
-        Filter type for custom filtering
-    lowcut : float
-        High-pass cutoff for custom filtering
-    highcut : float
-        Low-pass cutoff for custom filtering
-    apply_lowcut : bool
-        Apply high-pass filter (custom method only)
-    apply_highcut : bool
-        Apply low-pass filter (custom method only)
-
-    Returns
-    -------
-    array
-        Filtered Doppler signal
     """
-    if method == 'bessel_25hz':
+
+    if method == 'sg_wavelet':
+        # Use the parameters directly from the function signature and enforce types
+        sg_win = float(sg_win)
+        level = int(level)
+        alpha = float(alpha)
+        drop_levels = int(drop_levels)
+        trend_win = float(trend_win)
+
+        # 1. Detrend
+        trend = get_robust_trend(signal, sampling_rate, trend_win)
+        detrended = signal - trend
+        
+        # 2. Savitzky-Golay
+        w_len = int(sg_win * sampling_rate) | 1 # ensure odd
+        w_len = max(3, w_len)
+        sg = savgol_filter(detrended, window_length=w_len, polyorder=3)
+        
+        # 3. Wavelet
+        clean_ac = wavelet_denoise_iqr(sg, wavelet, level, alpha, drop_levels)
+        
+        # 4. Retrend
+        doppler_filtered = clean_ac + trend
+
+    elif method == 'bessel_25hz':
         wn = float(cutoff_freq) / (float(sampling_rate) / 2.0)
         wn = min(max(wn, 1e-6), 0.999999)
         b, a = bessel(filter_order, wn, btype="low", analog=False, output="ba", norm="phase")
@@ -83,7 +180,6 @@ def filter_doppler(signal, sampling_rate, method='bessel_25hz', filter_order=3,
         doppler_filtered = signal.copy()
 
     return doppler_filtered
-
 
 # ============================================================
 # Peaks / troughs
@@ -286,51 +382,52 @@ def calculate_doppler_metrics(signal, peaks, troughs, sampling_rate, target_fs=4
 
 def process_doppler(signal, sampling_rate, params):
     """
-    Complete Doppler processing pipeline (BP-like) WITHOUT calibration-artifact handling.
-
-    Returns
-    -------
-    dict or None
-      - raw
-      - filtered
-      - dicrotic_notches (kept for compatibility)
-      - auto_peaks, current_peaks
-      - auto_troughs, current_troughs
-      - peaks_times, troughs_times
-      - n_peaks, n_troughs
-      - plus calculate_doppler_metrics outputs
+    Complete Doppler processing pipeline WITH Beat Quality Scoring.
     """
+    # 1. Filter Signal (Now explicitly unpacking all new Wavelet parameters)
     doppler_filtered = filter_doppler(
-        signal,
-        sampling_rate,
-        method=params.get('filter_method', 'bessel_25hz'),
+        signal, 
+        sampling_rate, 
+        method=params.get('filter_method', 'sg_wavelet'),
+        # Standard filter params
         filter_order=params.get('filter_order', 3),
         cutoff_freq=params.get('cutoff_freq', 25),
         filter_type=params.get('filter_type', 'butterworth'),
         lowcut=params.get('lowcut', 0.5),
         highcut=params.get('highcut', 15.0),
         apply_lowcut=params.get('apply_lowcut', True),
-        apply_highcut=params.get('apply_highcut', True)
+        apply_highcut=params.get('apply_highcut', True),
+        # NEW SG+Wavelet params mapped directly from Streamlit UI
+        sg_win=params.get('sg_win', 0.1),
+        wavelet=params.get('wavelet', 'db6'),
+        level=params.get('level', 10),
+        alpha=params.get('alpha', 4.0),
+        drop_levels=params.get('drop_levels', 1),
+        trend_win=params.get('trend_win', 2.0)
     )
 
+    # 2. Detect Peaks (Forcing Delineator as requested)
     peak_result = detect_doppler_peaks(
-        doppler_filtered,
-        sampling_rate,
-        method=params.get('peak_method', 'delineator'),
-        prominence=params.get('prominence', 10)
+        doppler_filtered, 
+        sampling_rate, 
+        method='delineator' 
     )
 
     peaks = peak_result['peaks']
     troughs = peak_result['troughs']
-    dicrotic_notches = peak_result['dicrotic_notches']
 
     if len(peaks) < 2 or len(troughs) < 2:
         return None
 
+    # 3. Calculate Beat Quality Scores (Shift-Invariant Correlation)
+    template, scores = extract_template_and_score(doppler_filtered, troughs)
+    mean_quality = float(np.mean(scores)) if len(scores) > 0 else np.nan
+
+    # 4. Pack Result
     result = {
         'raw': signal,
         'filtered': doppler_filtered,
-        'dicrotic_notches': dicrotic_notches,
+        'dicrotic_notches': peak_result['dicrotic_notches'],
 
         'auto_peaks': peaks.copy(),
         'current_peaks': peaks.copy(),
@@ -341,8 +438,13 @@ def process_doppler(signal, sampling_rate, params):
         'troughs_times': troughs / sampling_rate,
         'n_peaks': int(len(peaks)),
         'n_troughs': int(len(troughs)),
+        
+        # Store quality metrics
+        'beat_scores': scores, 
+        'mean_quality': mean_quality
     }
 
+    # Add the 4Hz aligned metrics
     doppler_metrics = calculate_doppler_metrics(doppler_filtered, peaks, troughs, sampling_rate)
     result.update(doppler_metrics)
 

@@ -2276,129 +2276,148 @@ def main():
 
 
     if 'doppler' in detected_signals:
-        with tab_objects[tab_idx]:
-            st.header("Doppler Processing")
+            with tab_objects[tab_idx]:
+                st.header("Doppler Processing")
 
-            col1, col2 = st.columns([2, 1])
+                # --- 1. UI FOR FILTER PARAMS ---
+                col1, col2, col3 = st.columns(3)
 
-            with col1:
-                filter_method = st.selectbox("Filter Method", config.BP_FILTER_METHODS, key='doppler_filter')
-                with st.expander("ℹ️ Filter Info"):
-                    st.info(config.BP_FILTER_INFO.get(filter_method, "No info available"))
-
-                peak_method = st.selectbox("Peak Detection", config.BP_PEAK_METHODS, key='doppler_peak')
-                with st.expander("ℹ️ Peak Method Info"):
-                    st.info(config.BP_PEAK_INFO.get(peak_method, "No info available"))
-
-            with col2:
-                # Removed: Detect Calibration Artifacts checkbox and any calibration logic
-
-                if peak_method == 'prominence':
-                    prominence = st.number_input("Prominence", min_value=1, max_value=100, value=10, key='doppler_prom')
-                else:
-                    prominence = 10
-
-            if st.button("Process Doppler", type="primary"):
-                signal = data['df'][data['signal_mappings']['doppler']].values
-
-                params = {
-                    'filter_method': filter_method,
-                    'peak_method': peak_method,
-                    'prominence': prominence,
-                    # Removed: 'detect_calibration'
-                }
-                st.session_state.doppler_params.update(params)
-
-                # NOTE: you need to implement this in metrics/doppler (or wherever you prefer)
-                # using BP logic with small modifications.
-                result = doppler.process_doppler(signal, sampling_rate, st.session_state.doppler_params)
-
-                if result is None:
-                    st.error("Processing failed: insufficient peaks detected")
-                else:
-                    st.session_state.doppler_result = result
-                    st.success("Doppler processed successfully")
-
-            if st.session_state.doppler_result is not None:
-                result = st.session_state.doppler_result
-
-                st.subheader("Manual Doppler Editing")
-
-                col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Auto Peaks", len(result['auto_peaks']))
+                    filter_method = st.selectbox(
+                        "Filter Method", 
+                        ['sg_wavelet', 'bessel_25hz', 'butterworth', 'custom'], 
+                        index=0, 
+                        key='doppler_filter'
+                    )   
+                    # Hardcoding Peak Detection to Delineator
+                    peak_method = 'delineator' 
+                    st.info("Peak Detection locked to 'Delineator'.")
+
                 with col2:
-                    st.metric("Auto Troughs", len(result['auto_troughs']))
+                    if filter_method == 'sg_wavelet':
+                        sg_win = st.number_input("SG Window (s)", value=0.1, step=0.05, key='dopp_sg')
+                        wavelet = st.selectbox("Wavelet Type", ['db6', 'sym8', 'db4'], index=0, key='dopp_wav')
+                        level = st.number_input("Decomp Level", min_value=1, max_value=12, value=10, key='dopp_lvl')
+                    else:
+                        st.info("Standard method parameters applied.")
+
                 with col3:
-                    n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
-                    st.metric("Added Peaks", n_added_peaks)
-                with col4:
-                    n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
-                    st.metric("Added Troughs", n_added_troughs)
+                    if filter_method == 'sg_wavelet':
+                        alpha = st.number_input("IQR Alpha (Spikes)", value=4.0, step=0.5, key='dopp_alpha')
+                        drop_levels = st.number_input("Drop Fine Levels", min_value=0, max_value=4, value=1, key='dopp_drop')
 
-                time = np.arange(len(result['filtered'])) / sampling_rate
+                # --- 2. EXECUTE PROCESSING ---
+                if st.button("Process Doppler", type="primary"):
+                    signal = data['df'][data['signal_mappings']['doppler']].values
 
-                # --- 1. Calculate Aligned 4Hz Doppler Metrics & Derived HR ---
-                # Keep HR-from-peaks identical to BP.
-                from metrics.ecg import calculate_hr
+                    # Build params dictionary dynamically
+                    params = {
+                        'filter_method': filter_method,
+                        'peak_method': peak_method,
+                    }
+                    if filter_method == 'sg_wavelet':
+                        params.update({
+                            'sg_win': sg_win,
+                            'wavelet': wavelet,
+                            'level': level,
+                            'alpha': alpha,
+                            'drop_levels': drop_levels
+                        })
 
-                # Create a doppler metric function analogous to calculate_bp_metrics.
-                # If you truly want "same as BP", you can implement calculate_doppler_metrics
-                # by copying calculate_bp_metrics and renaming outputs.
-                from metrics.doppler import calculate_doppler_metrics
+                    st.session_state.doppler_params.update(params)
 
-                doppler_data_4hz = calculate_doppler_metrics(
-                    result['filtered'],
-                    result['current_peaks'],
-                    result['current_troughs'],
-                    sampling_rate
-                )
+                    # Execute pipeline
+                    result = doppler.process_doppler(signal, sampling_rate, st.session_state.doppler_params)
 
-                hr_from_doppler = calculate_hr(
-                    result['current_peaks'],
-                    sampling_rate,
-                    len(result['filtered']),
-                    rate_method=st.session_state.doppler_params.get('rate_method', 'monotone_cubic')
-                )
+                    if result is None:
+                        st.error("Processing failed: insufficient peaks detected.")
+                    else:
+                        st.session_state.doppler_result = result
+                        st.success("Doppler processed successfully.")
 
-                # Zoom initialization
-                if 'doppler_region_start' not in st.session_state:
-                    st.session_state.doppler_region_start = 0.0
-                if 'doppler_region_end' not in st.session_state:
-                    st.session_state.doppler_region_end = min(10.0, float(time[-1]))
+                # --- 3. DISPLAY RESULTS ---
+                if st.session_state.doppler_result is not None:
+                    result = st.session_state.doppler_result
 
-                doppler_zoom = (st.session_state.doppler_region_start, st.session_state.doppler_region_end)
+                    st.subheader("Manual Doppler Editing")
 
-                # --- 2. Generate Figure ---
-                fig = create_rsp_bp_plot(
-                    time, result['raw'], result['filtered'],
-                    result['current_peaks'], result['current_troughs'],
-                    result['auto_peaks'], result['auto_troughs'],
-                    'DOPPLER',
-                    bp_data=doppler_data_4hz,      # reuse the same argument name to keep layout identical
-                    hr_data=hr_from_doppler,
-                    ui_revision='doppler_plot',
-                    zoom_range=doppler_zoom
-                )
+                    # Peak/Trough Editing Stats
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Auto Peaks", len(result['auto_peaks']))
+                    with col2:
+                        st.metric("Auto Troughs", len(result['auto_troughs']))
+                    with col3:
+                        n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
+                        st.metric("Added Peaks", n_added_peaks)
+                    with col4:
+                        n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
+                        st.metric("Added Troughs", n_added_troughs)
 
-                # Removed: Calibration Artifact Sidebar Info block
+                    # Time Array
+                    time = np.arange(len(result['filtered'])) / sampling_rate
 
-                st.plotly_chart(fig, use_container_width=True)
+                    # Calculate Aligned Metrics & HR
+                    from metrics.doppler import calculate_doppler_metrics
+                    from metrics.ecg import calculate_hr
 
-                # --- 3. Statistics Section ---
-                st.subheader("Statistics")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric("Final Cycles", min(len(result['current_peaks']), len(result['current_troughs'])))
-                with col2:
-                    st.metric("Mean Peak", f"{doppler_data_4hz['mean_peak']:.3f}")
-                with col3:
-                    st.metric("Mean Trough", f"{doppler_data_4hz['mean_trough']:.3f}")
-                with col4:
-                    st.metric("Mean Amplitude", f"{doppler_data_4hz['mean_amp']:.3f}")
+                    doppler_data_4hz = calculate_doppler_metrics(
+                        result['filtered'],
+                        result['current_peaks'],
+                        result['current_troughs'],
+                        sampling_rate
+                    )
 
-        tab_idx += 1
+                    hr_from_doppler = calculate_hr(
+                        result['current_peaks'],
+                        sampling_rate,
+                        len(result['filtered']),
+                        rate_method=st.session_state.doppler_params.get('rate_method', 'monotone_cubic')
+                    )
 
+                    # Zoom constraints
+                    if 'doppler_region_start' not in st.session_state:
+                        st.session_state.doppler_region_start = 0.0
+                    if 'doppler_region_end' not in st.session_state:
+                        st.session_state.doppler_region_end = min(10.0, float(time[-1]))
+                    doppler_zoom = (st.session_state.doppler_region_start, st.session_state.doppler_region_end)
+
+                    # Generate Plotly Chart
+                    fig = create_rsp_bp_plot(
+                        time, result['raw'], result['filtered'],
+                        result['current_peaks'], result['current_troughs'],
+                        result['auto_peaks'], result['auto_troughs'],
+                        'DOPPLER',
+                        bp_data=doppler_data_4hz,
+                        hr_data=hr_from_doppler,
+                        ui_revision='doppler_plot',
+                        zoom_range=doppler_zoom
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                    # --- 4. STATISTICS SECTION ---
+                    st.subheader("Statistics")
+                    
+                    col1, col2, col3, col4, col5 = st.columns(5)
+                    with col1:
+                        st.metric("Final Cycles", min(len(result['current_peaks']), len(result['current_troughs'])))
+                    with col2:
+                        st.metric("Mean Peak", f"{doppler_data_4hz['mean_peak']:.3f}")
+                    with col3:
+                        st.metric("Mean Trough", f"{doppler_data_4hz['mean_trough']:.3f}")
+                    with col4:
+                        st.metric("Mean Amplitude", f"{doppler_data_4hz['mean_amp']:.3f}")
+                    with col5:
+                        q_score = result.get('mean_quality', np.nan)
+                        if not np.isnan(q_score):
+                            # Streamlit delta styling: Green "Good" if score >= 0.8, Red "Review" if lower
+                            delta_color = "normal" if q_score >= 0.8 else "inverse"
+                            delta_str = "Good" if q_score >= 0.8 else "Review suggested"
+                            st.metric("Avg Beat Quality", f"{q_score:.2f}", delta=delta_str, delta_color=delta_color)
+                        else:
+                            st.metric("Avg Beat Quality", "N/A")
+
+            tab_idx += 1
 
 
 

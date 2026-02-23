@@ -9,13 +9,14 @@ mask_opacity).
 
 import hashlib
 import json
+import os
 import tempfile
 from pathlib import Path
 
 import nibabel as nib
 import numpy as np
 
-_CACHE_DIR = Path(tempfile.gettempdir()) / 'physio_qc_masked'
+_CACHE_DIR = Path(tempfile.gettempdir()) / f'physio_qc_masked_{os.getuid()}'
 
 
 def create_masked_volume(volume_path, mask_path, mask_opacity=1.0):

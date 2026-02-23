@@ -511,6 +511,104 @@ Y_AXIS_LABELS = {
 }
 
 # =============================================================================
+# NEURO MODE (NIfTI Viewer)
+# =============================================================================
+
+# Path to raw BIDS dataset (contains sub-*/ses-*/anat/ and sub-*/ses-*/func/)
+BIDS_DATA_PATH = '/export02/projects/LCS/BIDS'
+
+# Path to fMRIPrep derivatives (contains sub-*/anat/ and sub-*/ses-*/func/)
+FMRIPREP_DERIVATIVES_PATH = '/export02/projects/LCS/BIDS/derivatives/fmriprep/out'
+
+# Path to sMRI derivatives (coregistered structural images in T1w space)
+SMRI_DERIVATIVES_PATH = '/export02/projects/LCS/BIDS/derivatives/sMRI'
+
+# Port for the local HTTP server that serves NIfTI files to NiiVue
+NIFTI_SERVER_PORT = 8599
+
+# Default overlay settings for the structural tab
+# Entries with 'variants' show a dropdown in the gear popover to switch
+# between different files for the same conceptual overlay.
+STRUCTURAL_OVERLAYS = {
+    'brain_mask':  {'colormap': 'red',       'opacity': 0.3, 'label': 'Brain Mask'},
+    'tissue_seg':  {
+        'colormap': 'freesurfer', 'opacity': 0.4, 'label': 'Tissue Segmentation',
+        'variants': {
+            'All (discrete)': {'key': 'dseg',        'colormap': 'freesurfer'},
+            'GM Probability':  {'key': 'GM_probseg',  'colormap': 'warm'},
+            'WM Probability':  {'key': 'WM_probseg',  'colormap': 'winter'},
+            'CSF Probability': {'key': 'CSF_probseg', 'colormap': 'blue'},
+        },
+    },
+    'T2starmap':   {'colormap': 'plasma',    'opacity': 0.9, 'label': 'T2* Map'},
+    'SWI':         {'colormap': 'viridis',      'opacity': 0.9, 'label': 'SWI'},
+    'FLAIR':       {'colormap': 'thermal',      'opacity': 0.9, 'label': 'FLAIR'},
+    'T1map':       {'colormap': 'electric_blue',   'invert': True, 'opacity': 0.9, 'label': 'T1 Map'},
+}
+
+# Default overlay settings for the functional tab
+FUNCTIONAL_OVERLAYS = {
+    'boldref_T1w':  {'colormap': 'inferno',   'opacity': 0.9, 'label': 'BOLD Ref (T1w space)'},
+    'brain_mask':   {'colormap': 'red',    'opacity': 0.5, 'label': 'Brain Mask'},
+    'tissue_seg':   {
+        'colormap': 'freesurfer', 'opacity': 0.4, 'label': 'Tissue Segmentation',
+        'variants': {
+            'All (discrete)': {'key': 'dseg',        'colormap': 'freesurfer'},
+            'GM Probability':  {'key': 'GM_probseg',  'colormap': 'warm'},
+            'WM Probability':  {'key': 'WM_probseg',  'colormap': 'winter'},
+            'CSF Probability': {'key': 'CSF_probseg', 'colormap': 'blue'},
+        },
+    },
+    'T2starmap':    {'colormap': 'plasma', 'opacity': 0.9, 'label': 'T2* Map'},
+}
+
+# =============================================================================
+# GLM / CVR DERIVATIVES
+# =============================================================================
+
+# Root path for CVR derivatives (contains method subdirs like FIR/, ET/)
+CVR_DERIVATIVES_PATH = '/export02/projects/LCS/BIDS/derivatives/CVR'
+
+# Default overlay settings for the GLM/CVR tab
+GLM_OVERLAYS = {
+    'mean_bold':    {'colormap': 'thermal',      'opacity': 0.9, 'label': 'Mean BOLD'},
+    'constant':     {'colormap': 'thermal',      'opacity': 0.9, 'label': 'Constant (Intercept)'},
+    'cvr_hc':       {'colormap': 'cold_hot',       'opacity': 0.9, 'label': 'CVR (Hypercapnia)',
+                     'cal_min': -1.5, 'cal_max': 1.5},
+    'cvr_hx':       {'colormap': 'cold_hot',       'opacity': 0.9, 'label': 'CVR (Hypoxia)',
+                     'cal_min': -0.3, 'cal_max': 0.3},
+    'tmap_hc':      {'colormap': 'cold_hot',       'opacity': 0.9, 'label': 'T-map (Hypercapnia)',
+                     'cal_min': -5.0, 'cal_max': 5.0},
+    'tmap_hx':      {'colormap': 'cold_hot',       'opacity': 0.9, 'label': 'T-map (Hypoxia)',
+                     'cal_min': -5.0, 'cal_max': 5.0},
+    'fstat_hc':     {'colormap': 'thermal',          'opacity': 0.9, 'label': 'F-stat (Hypercapnia)',
+                     'cal_min': 0.0, 'cal_max': 100.0},
+    'fstat_hx':     {'colormap': 'thermal',          'opacity': 0.9, 'label': 'F-stat (Hypoxia)',
+                     'cal_min': 0.0, 'cal_max': 100.0},
+    'fz_hc':        {'colormap': 'thermal',          'opacity': 0.9, 'label': 'F z-score (Hypercapnia)',
+                     'cal_min': 0.0, 'cal_max': 5.0},
+    'fz_hx':        {'colormap': 'thermal',          'opacity': 0.9, 'label': 'F z-score (Hypoxia)',
+                     'cal_min': 0.0, 'cal_max': 5.0},
+    'cnr_hc':       {'colormap': 'thermal',       'opacity': 0.9, 'label': 'CNR (Hypercapnia)',
+                     'cal_min': 0, 'cal_max': 1.0},
+    'cnr_hx':       {'colormap': 'thermal',       'opacity': 0.9, 'label': 'CNR (Hypoxia)',
+                     'cal_min': 0, 'cal_max': 1.0},
+    'snr':          {'colormap': 'thermal',    'opacity': 0.9, 'label': 'SNR (Constant/RMS Resid)'},
+    'r_squared':    {'colormap': 'thermal',    'opacity': 0.9, 'label': 'R-squared', 
+                     'cal_min': 0.0, 'cal_max': 1.0},
+    'resid_scaled': {'colormap': 'thermal',   'opacity': 0.9, 'label': 'Scaled Residuals',
+                     'cal_min': 0.0, 'cal_max': 0.1},
+    'brain_mask':   {'colormap': 'red',       'opacity': 0.3, 'label': 'Brain Mask'},
+}
+
+# Available colormaps in NiiVue (subset of most useful ones)
+NIIVUE_COLORMAPS = [
+    'gray', 'red', 'green', 'blue', 'warm', 'electric_blue', 'cool', 'plasma',
+    'viridis', 'inferno', 'winter', 'hot', 'freesurfer', 'thermal', 'blue2red',
+    'cold_hot',
+]
+
+# =============================================================================
 # UI THEME
 # =============================================================================
 

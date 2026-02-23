@@ -9,8 +9,18 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
+import streamlit.components.v1 as components
+
 import config
 from utils.file_io import scan_data_directory, find_file_path, load_acq_file
+from utils.bids_scan import (
+    scan_bids_subjects, get_structural_images, get_functional_images,
+    get_available_tasks, get_cvr_methods, get_cvr_spaces, get_cvr_tasks,
+    get_glm_images,
+)
+from neuro.niivue_component import build_niivue_html, colormap_css
+from neuro.file_server import register_file, clear_cache as clear_nifti_cache
+from neuro.masking import create_masked_volume
 from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2, doppler
 from utils import peak_editing, export
 
@@ -26,6 +36,11 @@ st.set_page_config(
     page_icon="📈",
     layout="wide"
 )
+
+# Clear stale NIfTI symlinks once per session (prevents >1GB static dir)
+if '_nifti_cache_cleared' not in st.session_state:
+    clear_nifti_cache()
+    st.session_state['_nifti_cache_cleared'] = True
 
 
 CSS = """
@@ -145,6 +160,20 @@ def init_session_state():
         st.session_state.doppler_zoom_range = None
 
 
+
+    # Neuro mode state
+    if 'neuro_data_loaded' not in st.session_state:
+        st.session_state.neuro_data_loaded = False
+    if 'neuro_participant' not in st.session_state:
+        st.session_state.neuro_participant = None
+    if 'neuro_session' not in st.session_state:
+        st.session_state.neuro_session = None
+    if 'neuro_structural_images' not in st.session_state:
+        st.session_state.neuro_structural_images = {}
+    if 'neuro_functional_tasks' not in st.session_state:
+        st.session_state.neuro_functional_tasks = []
+    if 'neuro_glm_available' not in st.session_state:
+        st.session_state.neuro_glm_available = False
 
 
 def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name, sampling_rate,
@@ -912,11 +941,515 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
             st.metric("BR Std Dev", f"{result['std_br']:.1f} bpm")
 
 
+@st.fragment
+def _build_neuro_tab(tab_key, image_paths, overlay_config):
+    """
+    Shared logic for the Structural and Functional neuro tabs.
+
+    Decorated with @st.fragment so widget interactions inside a tab only
+    re-execute this function, not the entire page (avoids reloading the
+    other tab's NIfTI data).
+
+    NIfTI files are served by a background HTTP server (file_server)
+    and loaded by NiiVue via URL.  This keeps the HTML payload tiny
+    and avoids Tornado's Content-Encoding decompression of .nii.gz.
+
+    Parameters
+    ----------
+    tab_key : str
+        Prefix for widget keys ('struct' or 'func').
+    image_paths : dict
+        {image_key: absolute_path} — must include 'T1w' for background.
+    overlay_config : dict
+        Overlay defaults from config (e.g. config.STRUCTURAL_OVERLAYS).
+    """
+    if not image_paths:
+        st.warning("No images found for this subject")
+        return
+
+    # -- Build unified image config: T1w first, then overlays that exist --
+    all_images = {}
+    if 'T1w' in image_paths:
+        all_images['T1w'] = {
+            'colormap': 'gray', 'opacity': 1.0, 'label': 'T1w',
+        }
+    for key, defaults in overlay_config.items():
+        if 'variants' in defaults:
+            # Include if ANY variant file exists
+            if any(v['key'] in image_paths for v in defaults['variants'].values()):
+                all_images[key] = defaults
+        elif key in image_paths:
+            all_images[key] = defaults
+
+    # -- Session state for layer ordering --
+    layers_key = f'{tab_key}_layers'
+    prev_sel_key = f'{tab_key}_prev_sel'
+
+    if layers_key not in st.session_state:
+        st.session_state[layers_key] = ['T1w'] if 'T1w' in all_images else []
+    if prev_sel_key not in st.session_state:
+        st.session_state[prev_sel_key] = set(st.session_state[layers_key])
+
+    # Prune stale keys (e.g. after subject change)
+    valid_keys = set(all_images.keys())
+    st.session_state[layers_key] = [k for k in st.session_state[layers_key] if k in valid_keys]
+    st.session_state[prev_sel_key] = st.session_state[prev_sel_key] & valid_keys
+
+    # -- Label ↔ key mappings --
+    label_to_key = {cfg['label']: key for key, cfg in all_images.items()}
+    key_to_label = {key: cfg['label'] for key, cfg in all_images.items()}
+
+    # -- Create containers in visual order --
+    pills_container = st.container()
+    viewer_container = st.container()
+    stack_container = st.container()
+    paths_container = st.container()
+
+    # -- Pills: image selection --
+    with pills_container:
+        current_labels = [key_to_label[k] for k in st.session_state[layers_key]
+                          if k in key_to_label]
+        selected_labels = st.pills(
+            "Images",
+            list(key_to_label.values()),
+            selection_mode="multi",
+            default=current_labels,
+            key=f'{tab_key}_pills',
+        )
+
+    # -- Diff to detect added/removed images --
+    selected_keys = {label_to_key[lbl] for lbl in selected_labels} if selected_labels else set()
+    prev_selected = st.session_state[prev_sel_key]
+    added = selected_keys - prev_selected
+    removed = prev_selected - selected_keys
+
+    layers = [k for k in st.session_state[layers_key] if k not in removed]
+    # Append newly added in config order (deterministic when multiple added at once)
+    for key in all_images:
+        if key in added:
+            layers.append(key)
+    st.session_state[layers_key] = layers
+    st.session_state[prev_sel_key] = selected_keys
+
+    # -- Auto-detect available masks from image_paths --
+    available_masks = {k: v for k, v in image_paths.items() if 'mask' in k.lower()}
+
+    # -- Layer stack UI (render before viewer so popover widgets populate state) --
+    with stack_container:
+        if layers:
+            st.caption("Layer Stack")
+            num_layers = len(layers)
+            for display_idx, key in enumerate(reversed(layers)):
+                stack_pos = num_layers - 1 - display_idx
+                defaults = all_images[key]
+
+                cols = st.columns([0.6, 2.5, 0.5, 0.5, 0.5, 0.5])
+
+                # -- Visibility state --
+                vis_key = f'{tab_key}_visible_{key}'
+                if vis_key not in st.session_state:
+                    st.session_state[vis_key] = True
+                is_visible = st.session_state[vis_key]
+
+                with cols[0]:
+                    if stack_pos == num_layers - 1:
+                        st.markdown("**TOP**")
+                    elif stack_pos == 0:
+                        st.markdown("**BTM**")
+                    else:
+                        st.markdown(f"**{stack_pos + 1}**")
+
+                with cols[1]:
+                    cur_cmap = st.session_state.get(
+                        f'{tab_key}_cmap_{key}', defaults['colormap'])
+                    cur_invert = st.session_state.get(
+                        f'{tab_key}_invert_{key}', False)
+                    gradient = colormap_css(cur_cmap, invert=cur_invert)
+                    # Resolve effective cal_min/cal_max for display
+                    disp_min = st.session_state.get(f'{tab_key}_cal_min_{key}')
+                    disp_max = st.session_state.get(f'{tab_key}_cal_max_{key}')
+                    if disp_min is None:
+                        disp_min = defaults.get('cal_min')
+                    if disp_max is None:
+                        disp_max = defaults.get('cal_max')
+                    # Build colorbar with tick marks when min/max are known
+                    has_range = (disp_min is not None and disp_max is not None)
+                    if is_visible:
+                        if has_range:
+                            n_ticks = 5
+                            tick_vals = [
+                                disp_min + i * (disp_max - disp_min) / (n_ticks - 1)
+                                for i in range(n_ticks)
+                            ]
+                            tick_html = ''.join(
+                                f'<span>{v:.2g}</span>' for v in tick_vals
+                            )
+                            st.markdown(
+                                f'{defaults["label"]}'
+                                f'<div style="height:10px;border-radius:2px;'
+                                f'background:{gradient};margin-top:2px;"></div>'
+                                f'<div style="display:flex;justify-content:space-between;'
+                                f'font-size:14px;color:#888;margin-top:1px;">'
+                                f'{tick_html}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f'{defaults["label"]}'
+                                f'<div style="height:4px;border-radius:2px;'
+                                f'background:{gradient};margin-top:2px;"></div>',
+                                unsafe_allow_html=True,
+                            )
+                    else:
+                        st.markdown(
+                            f'~~{defaults["label"]}~~'
+                            f'<div style="height:4px;border-radius:2px;'
+                            f'background:#333;margin-top:2px;"></div>',
+                            unsafe_allow_html=True,
+                        )
+
+                with cols[2]:
+                    icon = "\U0001F441" if is_visible else "\u2014"
+                    if st.button(icon, key=f'{tab_key}_vis_btn_{key}',
+                                 help="Toggle visibility"):
+                        st.session_state[vis_key] = not is_visible
+                        st.rerun(scope="fragment")
+
+                with cols[3]:
+                    if stack_pos < num_layers - 1:
+                        if st.button("\u2191", key=f'{tab_key}_up_{key}'):
+                            lst = st.session_state[layers_key]
+                            lst[stack_pos], lst[stack_pos + 1] = lst[stack_pos + 1], lst[stack_pos]
+                            st.rerun(scope="fragment")
+
+                with cols[4]:
+                    if stack_pos > 0:
+                        if st.button("\u2193", key=f'{tab_key}_down_{key}'):
+                            lst = st.session_state[layers_key]
+                            lst[stack_pos], lst[stack_pos - 1] = lst[stack_pos - 1], lst[stack_pos]
+                            st.rerun(scope="fragment")
+
+                with cols[5]:
+                    with st.popover("⚙", use_container_width=True):
+                        # Variant selector (e.g. tissue seg: All/GM/WM/CSF)
+                        if 'variants' in defaults:
+                            available = {name: v for name, v in defaults['variants'].items()
+                                         if v['key'] in image_paths}
+                            variant_name = st.selectbox(
+                                "Type",
+                                list(available.keys()),
+                                key=f'{tab_key}_variant_{key}',
+                            )
+                            # Update default colormap to match the selected variant
+                            variant_cmap = available[variant_name]['colormap']
+                        else:
+                            variant_cmap = defaults['colormap']
+
+                        default_cmap = variant_cmap
+                        st.selectbox(
+                            "Colormap",
+                            config.NIIVUE_COLORMAPS,
+                            index=config.NIIVUE_COLORMAPS.index(default_cmap)
+                                  if default_cmap in config.NIIVUE_COLORMAPS else 0,
+                            key=f'{tab_key}_cmap_{key}',
+                        )
+                        st.checkbox(
+                            "Invert colormap",
+                            key=f'{tab_key}_invert_{key}',
+                        )
+                        st.slider(
+                            "Opacity", 0.0, 1.0, defaults['opacity'],
+                            key=f'{tab_key}_opacity_{key}',
+                        )
+                        st.number_input(
+                            "Cal Min",
+                            value=defaults.get('cal_min'),
+                            format="%.1f",
+                            help="Minimum display intensity (empty = auto)",
+                            key=f'{tab_key}_cal_min_{key}',
+                        )
+                        st.number_input(
+                            "Cal Max",
+                            value=defaults.get('cal_max'),
+                            format="%.1f",
+                            help="Maximum display intensity (empty = auto)",
+                            key=f'{tab_key}_cal_max_{key}',
+                        )
+
+                        # -- Mask controls --
+                        # Don't show mask controls for mask images or the T1w background
+                        is_background = key == 'T1w'
+                        if available_masks and 'mask' not in key.lower() and not is_background:
+                            st.divider()
+                            mask_labels = {k: k.replace('_', ' ').title()
+                                           for k in available_masks}
+                            # Default mask ON for overlay images
+                            mask_on_key = f'{tab_key}_mask_on_{key}'
+                            if mask_on_key not in st.session_state:
+                                st.session_state[mask_on_key] = True
+                            st.checkbox(
+                                "Apply mask",
+                                key=mask_on_key,
+                            )
+                            if st.session_state.get(mask_on_key, True):
+                                mask_keys = list(available_masks.keys())
+                                st.selectbox(
+                                    "Mask",
+                                    mask_keys,
+                                    format_func=lambda k: mask_labels[k],
+                                    key=f'{tab_key}_mask_sel_{key}',
+                                )
+                                st.slider(
+                                    "Mask strength", 0.0, 1.0, 1.0,
+                                    help="1.0 = fully black outside mask, 0.0 = no masking",
+                                    key=f'{tab_key}_mask_opacity_{key}',
+                                )
+
+    # -- Build volumes from session state and render viewer --
+    with viewer_container:
+        if not layers:
+            st.info("Select at least one image above to view")
+            return
+
+        volumes = []
+        for key in layers:
+            # Skip hidden layers (visibility toggled off)
+            if not st.session_state.get(f'{tab_key}_visible_{key}', True):
+                continue
+
+            defaults = all_images[key]
+            cmap = st.session_state.get(f'{tab_key}_cmap_{key}', defaults['colormap'])
+            opacity = st.session_state.get(f'{tab_key}_opacity_{key}', defaults['opacity'])
+
+            # Resolve the actual file path key (may differ for variant overlays)
+            file_key = key
+            if 'variants' in defaults:
+                variant_name = st.session_state.get(f'{tab_key}_variant_{key}')
+                if variant_name and variant_name in defaults['variants']:
+                    file_key = defaults['variants'][variant_name]['key']
+                else:
+                    # Fall back to first available variant
+                    for v in defaults['variants'].values():
+                        if v['key'] in image_paths:
+                            file_key = v['key']
+                            break
+
+            if file_key not in image_paths:
+                continue
+
+            # Apply mask if enabled for this layer
+            volume_filepath = image_paths[file_key]
+            is_masked = False
+            mask_result = None
+            is_background = key == 'T1w'
+            mask_on = st.session_state.get(f'{tab_key}_mask_on_{key}', False)
+            if mask_on and 'mask' not in key.lower() and not is_background:
+                mask_sel = st.session_state.get(f'{tab_key}_mask_sel_{key}')
+                mask_strength = st.session_state.get(f'{tab_key}_mask_opacity_{key}', 1.0)
+                if mask_sel and mask_sel in image_paths and mask_strength > 0:
+                    mask_result = create_masked_volume(
+                        volume_filepath, image_paths[mask_sel], mask_strength,
+                    )
+                    volume_filepath = mask_result['path']
+                    is_masked = True
+
+            invert = st.session_state.get(f'{tab_key}_invert_{key}', False)
+            vol = {
+                'path': register_file(volume_filepath),
+                'name': f'{file_key}.nii.gz',
+                'colormap': cmap,
+                'opacity': opacity,
+            }
+            if invert:
+                vol['colormap_invert'] = True
+
+            cal_min = st.session_state.get(f'{tab_key}_cal_min_{key}')
+            cal_max = st.session_state.get(f'{tab_key}_cal_max_{key}')
+            # Masking uses a sentinel value (-1e10) for outside-brain voxels.
+            # NiiVue must have explicit cal_min/cal_max so it doesn't auto-range
+            # to include the sentinel. Use config defaults first, then fall
+            # back to the robust range computed from inside-mask voxels.
+            if is_masked and cal_min is None:
+                cal_min = defaults.get('cal_min')
+                if cal_min is None and mask_result:
+                    cal_min = mask_result['cal_min']
+            if is_masked and cal_max is None:
+                cal_max = defaults.get('cal_max')
+                if cal_max is None and mask_result:
+                    cal_max = mask_result['cal_max']
+            if cal_min is not None:
+                vol['cal_min'] = cal_min
+            if cal_max is not None:
+                vol['cal_max'] = cal_max
+
+            volumes.append(vol)
+
+        html = build_niivue_html(volumes, height=700, viewer_id=tab_key)
+        components.html(html, height=720, scrolling=False)
+
+    # -- File paths --
+    with paths_container:
+        with st.expander("File paths"):
+            for key in image_paths:
+                st.text(f"{key}: {image_paths[key]}")
+
+
+def run_neuro_mode():
+    """Neuro mode: NIfTI image viewer with NiiVue (via Streamlit static serving)."""
+    import os
+
+    bids_path = config.BIDS_DATA_PATH
+    deriv_path = config.FMRIPREP_DERIVATIVES_PATH
+
+    # --- Sidebar: data selection ---
+    with st.sidebar:
+        if not os.path.isdir(bids_path):
+            st.error(f"BIDS path not found:\n`{bids_path}`")
+            st.stop()
+
+        subjects = scan_bids_subjects(bids_path)
+        if not subjects:
+            st.error(f"No subjects found in {bids_path}")
+            return
+
+        participants = list(subjects.keys())
+        participant = st.selectbox("Participant", participants, key='neuro_part_sel')
+
+        sessions = subjects[participant]
+        session = st.selectbox("Session", sessions, key='neuro_ses_sel')
+
+        if st.button("Load Images", type="primary"):
+            smri_path = getattr(config, 'SMRI_DERIVATIVES_PATH', None)
+            struct_imgs = get_structural_images(bids_path, deriv_path, participant, session,
+                                                smri_path=smri_path)
+            func_tasks = get_available_tasks(deriv_path, participant, session)
+
+            st.session_state.neuro_structural_images = struct_imgs
+            st.session_state.neuro_functional_tasks = func_tasks
+            st.session_state.neuro_participant = participant
+            st.session_state.neuro_session = session
+            st.session_state.neuro_data_loaded = True
+
+            # Check for CVR/GLM derivatives
+            cvr_path = config.CVR_DERIVATIVES_PATH
+            st.session_state.neuro_glm_available = os.path.isdir(cvr_path)
+
+            if struct_imgs:
+                st.success(f"Found {len(struct_imgs)} structural images, {len(func_tasks)} tasks")
+            else:
+                st.warning("No fMRIPrep derivatives found for this subject")
+
+        if st.session_state.neuro_data_loaded:
+            st.divider()
+            st.markdown(f"**Subject**: {st.session_state.neuro_participant}")
+            st.markdown(f"**Session**: {st.session_state.neuro_session}")
+
+    # --- Main area ---
+    if not st.session_state.neuro_data_loaded:
+        st.info("Select a participant and session from the sidebar to view NIfTI images")
+        return
+
+    struct_images = st.session_state.neuro_structural_images
+    func_tasks = st.session_state.neuro_functional_tasks
+
+    glm_available = st.session_state.get('neuro_glm_available', False)
+
+    tab_names = ["Structural"]
+    if func_tasks:
+        tab_names.append("Functional")
+    if glm_available:
+        tab_names.append("CVR")
+
+    tabs = st.tabs(tab_names)
+
+    # ---- Structural tab ----
+    with tabs[0]:
+        st.header("Structural Images")
+        _build_neuro_tab('struct', struct_images, config.STRUCTURAL_OVERLAYS)
+
+    # ---- Functional tab ----
+    if func_tasks and len(tabs) > 1:
+        with tabs[tab_names.index("Functional")]:
+            st.header("Functional Images")
+
+            task = st.selectbox("Task", func_tasks, key='neuro_func_task')
+
+            func_images = get_functional_images(
+                config.FMRIPREP_DERIVATIVES_PATH,
+                st.session_state.neuro_participant,
+                st.session_state.neuro_session,
+                task,
+            )
+
+            _build_neuro_tab('func', func_images, config.FUNCTIONAL_OVERLAYS)
+
+    # ---- CVR tab ----
+    if glm_available and "CVR" in tab_names:
+        with tabs[tab_names.index("CVR")]:
+            st.header("CVR Maps")
+
+            participant = st.session_state.neuro_participant
+            session = st.session_state.neuro_session
+
+            methods = get_cvr_methods(config.CVR_DERIVATIVES_PATH)
+            if not methods:
+                st.warning("No CVR methods found in derivatives")
+            else:
+                col1, col2 = st.columns(2)
+                with col1:
+                    method = st.selectbox("Method", methods, key='glm_method_sel')
+                with col2:
+                    spaces = get_cvr_spaces(config.CVR_DERIVATIVES_PATH, method)
+                    if not spaces:
+                        st.warning(f"No spaces found for method {method}")
+                    else:
+                        space = st.selectbox("Space", spaces, key='glm_space_sel')
+
+                if methods and spaces:
+                    # Task selector — auto-detect available tasks
+                    tasks = get_cvr_tasks(
+                        config.CVR_DERIVATIVES_PATH, method, space,
+                        participant, session,
+                    )
+                    if len(tasks) > 1:
+                        task = st.selectbox("Task", tasks, key='glm_task_sel')
+                    elif tasks:
+                        task = tasks[0]
+                    else:
+                        task = 'gas'
+
+                    glm_images = get_glm_images(
+                        config.CVR_DERIVATIVES_PATH,
+                        config.FMRIPREP_DERIVATIVES_PATH,
+                        participant,
+                        session,
+                        method,
+                        space,
+                        task=task,
+                    )
+
+                    if not glm_images:
+                        st.warning(
+                            f"No GLM images found for {participant}/{session} "
+                            f"(method={method}, space={space}, task={task})"
+                        )
+                    else:
+                        _build_neuro_tab('glm', glm_images, config.GLM_OVERLAYS)
+
+
 def main():
     """Main application function"""
     init_session_state()
 
-    st.title("📈 Physiological Signal QC")
+    with st.sidebar:
+        mode = st.radio("Mode", ["Physio", "Neuro"], horizontal=True, key='app_mode')
+
+    if mode == "Neuro":
+        st.title("Neuro QC")
+        run_neuro_mode()
+        return
+
+    st.title("Physiological Signal QC")
 
     with st.sidebar:
         st.header("Data Selection")

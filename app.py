@@ -314,12 +314,20 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
                        signal_name, rate_interpolated=None, rate_bpm=None,
                        bp_data=None, hr_data=None, ui_revision='constant',
                        zoom_range=None, calibration_regions=None, rvt_data=None,
-                       phase_data=None):
+                       phase_data=None, beat_quality_scores=None,
+                       noisy_windows=None, noisy_mask_4hz=None):
     """Create 3 or 4-panel plot for RSP/BP with synchronized zooming"""
     signal_key = str(signal_name).strip().lower()
     is_bp = signal_key == 'bp'
+    is_doppler = signal_key == 'doppler'
     has_rvt = rvt_data is not None and not is_bp
     has_phase = phase_data is not None and not is_bp
+    has_beat_quality = (
+        is_doppler and
+        beat_quality_scores is not None and
+        len(beat_quality_scores) > 0 and
+        len(current_troughs) > 1
+    )
 
     if is_bp:
         labels = {
@@ -376,8 +384,12 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     else:
         titles.append(f'{signal_name} Rate')
 
-    # Enable secondary y-axis on row 2 for phase overlay
-    specs = [[{"secondary_y": (i == 1 and has_phase)}] for i in range(n_rows)]
+    # Enable secondary y-axis for phase/quality overlays.
+    specs = [[{"secondary_y": False}] for _ in range(n_rows)]
+    if n_rows >= 1 and has_beat_quality:
+        specs[0][0]["secondary_y"] = True
+    if n_rows >= 2 and (has_phase or has_beat_quality):
+        specs[1][0]["secondary_y"] = True
 
 
     fig = make_subplots(
@@ -409,6 +421,60 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             name=labels['troughs'], marker=dict(color='#4444FF', size=8)
         ), row=2, col=1)
 
+    # Doppler beat-wise quality overlay: horizontal segment per beat.
+    if has_beat_quality:
+        troughs = np.asarray(current_troughs, dtype=int)
+        troughs = troughs[(troughs >= 0) & (troughs < len(time))]
+        troughs = np.sort(troughs)
+        scores = np.asarray(beat_quality_scores, dtype=float).ravel()
+        n_segments = min(len(scores), max(len(troughs) - 1, 0))
+
+        x_quality = []
+        y_quality = []
+        for i in range(n_segments):
+            start_idx, end_idx = int(troughs[i]), int(troughs[i + 1])
+            if end_idx <= start_idx:
+                continue
+            score = float(scores[i])
+            x_quality.extend([time[start_idx], time[end_idx], None])
+            y_quality.extend([score, score, None])
+
+        if x_quality:
+            quality_style = dict(color='#FFD166', width=1.8, dash='dot')
+            fig.add_trace(
+                go.Scatter(
+                    x=x_quality,
+                    y=y_quality,
+                    mode='lines',
+                    name='Beat Quality',
+                    line=quality_style,
+                    opacity=0.85,
+                ),
+                row=1, col=1, secondary_y=True
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=x_quality,
+                    y=y_quality,
+                    mode='lines',
+                    name='Beat Quality',
+                    line=quality_style,
+                    opacity=0.85,
+                    showlegend=False,
+                ),
+                row=2, col=1, secondary_y=True
+            )
+            fig.update_yaxes(
+                title_text='Beat Quality (0-1)',
+                range=[0, 1.05],
+                row=1, col=1, secondary_y=True
+            )
+            fig.update_yaxes(
+                title_text='Beat Quality (0-1)',
+                range=[0, 1.05],
+                row=2, col=1, secondary_y=True
+            )
+
     # Phase overlay on row 2 (secondary y-axis, 0-1)
     if has_phase:
         fig.add_trace(go.Scatter(
@@ -437,9 +503,55 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     if is_bp_like and bp_data is not None:
     #if is_bp and bp_data is not None:
         t_4hz = bp_data['time_4hz']
-        fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
+        if is_doppler and noisy_mask_4hz is not None and len(noisy_mask_4hz) == len(t_4hz):
+            noisy_mask_4hz = np.asarray(noisy_mask_4hz, dtype=bool)
+            has_noisy = bool(np.any(noisy_mask_4hz))
+            if has_noisy:
+                sbp_clean = np.where(~noisy_mask_4hz, bp_data['sbp_4hz'], np.nan)
+                map_clean = np.where(~noisy_mask_4hz, bp_data['map_4hz'], np.nan)
+                dbp_clean = np.where(~noisy_mask_4hz, bp_data['dbp_4hz'], np.nan)
+                sbp_noisy = np.where(noisy_mask_4hz, bp_data['sbp_4hz'], np.nan)
+                map_noisy = np.where(noisy_mask_4hz, bp_data['map_4hz'], np.nan)
+                dbp_noisy = np.where(noisy_mask_4hz, bp_data['dbp_4hz'], np.nan)
+
+                # Clean sections keep default visual emphasis.
+                fig.add_trace(go.Scatter(x=t_4hz, y=sbp_clean, name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=map_clean, name='MAP', line=dict(color='green', width=2)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=dbp_clean, name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
+
+                # Noisy sections are thinner and more transparent dashed overlays.
+                fig.add_trace(
+                    go.Scatter(
+                        x=t_4hz, y=sbp_noisy, name='SBP (Noisy)',
+                        line=dict(color='red', width=1.0, dash='dash'),
+                        opacity=0.4
+                    ),
+                    row=3, col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=t_4hz, y=map_noisy, name='MAP (Noisy)',
+                        line=dict(color='green', width=1.2, dash='dash'),
+                        opacity=0.4
+                    ),
+                    row=3, col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=t_4hz, y=dbp_noisy, name='DBP (Noisy)',
+                        line=dict(color='blue', width=1.0, dash='dash'),
+                        opacity=0.4
+                    ),
+                    row=3, col=1
+                )
+            else:
+                fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
+        else:
+            fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
     elif rate_interpolated is not None:
         fig.add_trace(
             go.Scatter(x=time, y=rate_interpolated, name=labels['rate'], line=dict(color='#FF6B6B', width=2)),
@@ -501,9 +613,272 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     if zoom_range is not None:
         fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
 
+    # Highlight Doppler noisy windows across all panels.
+    if is_doppler and noisy_windows:
+        for x0, x1 in noisy_windows:
+            if x1 > x0:
+                fig.add_vrect(
+                    x0=float(x0),
+                    x1=float(x1),
+                    fillcolor='rgba(255, 99, 71, 0.14)',
+                    line_width=0,
+                    layer='below',
+                    row='all',
+                    col=1
+                )
+
     fig.update_layout(height=height, template='plotly_dark', showlegend=True, hovermode='x unified', uirevision=ui_revision)
     fig.update_traces(connectgaps=False)
     return fig
+
+
+def compute_doppler_noisy_windows(
+    signal_length,
+    sampling_rate,
+    trough_indices,
+    beat_quality_scores,
+    window_sec=10.0,
+    step_sec=5.0,
+    quality_threshold=0.8,
+):
+    """
+    Classify noisy Doppler windows from beat-wise quality.
+
+    Beat quality is treated as piecewise-constant between consecutive troughs.
+    A window is noisy when its time-weighted mean quality is below threshold.
+    """
+    if signal_length <= 0 or sampling_rate <= 0:
+        return [], np.zeros(0, dtype=bool)
+
+    noisy_mask = np.zeros(int(signal_length), dtype=bool)
+    troughs = np.asarray(trough_indices, dtype=int).ravel()
+    scores = np.asarray(beat_quality_scores, dtype=float).ravel()
+
+    if len(troughs) < 2 or len(scores) == 0:
+        return [], noisy_mask
+
+    troughs = troughs[(troughs >= 0) & (troughs < signal_length)]
+    troughs = np.sort(troughs)
+    n_beats = min(len(scores), max(len(troughs) - 1, 0))
+    if n_beats <= 0:
+        return [], noisy_mask
+
+    beat_starts = troughs[:n_beats] / float(sampling_rate)
+    beat_ends = troughs[1:n_beats + 1] / float(sampling_rate)
+    beat_scores = scores[:n_beats]
+
+    duration = max(0.0, (float(signal_length) - 1.0) / float(sampling_rate))
+    if duration <= 0:
+        return [], noisy_mask
+
+    win = float(window_sec)
+    step = float(step_sec)
+    if win <= 0 or step <= 0:
+        return [], noisy_mask
+
+    noisy_windows = []
+    start_t = 0.0
+    while start_t < duration:
+        end_t = min(start_t + win, duration)
+        if end_t <= start_t:
+            break
+
+        overlap_start = np.maximum(beat_starts, start_t)
+        overlap_end = np.minimum(beat_ends, end_t)
+        overlap = np.maximum(0.0, overlap_end - overlap_start)
+
+        if np.any(overlap > 0):
+            w = overlap
+            q_mean = float(np.nansum(beat_scores * w) / np.nansum(w))
+            if np.isfinite(q_mean) and q_mean < quality_threshold:
+                noisy_windows.append((start_t, end_t))
+                i0 = max(0, int(np.floor(start_t * sampling_rate)))
+                i1 = min(signal_length, int(np.ceil(end_t * sampling_rate)))
+                if i1 > i0:
+                    noisy_mask[i0:i1] = True
+
+        start_t += step
+
+    return noisy_windows, noisy_mask
+
+
+def create_doppler_beat_overlay_plot(
+    signal,
+    sampling_rate,
+    trough_indices,
+    beat_quality_scores,
+    quality_threshold=0.95,
+    target_len=200,
+    include_intervals=None,
+    title='High-Quality Beat Overlay',
+):
+    """Plot accepted Doppler beats (gray) and their average waveform (blue)."""
+    signal = np.asarray(signal) if signal is not None else np.asarray([])
+    troughs = np.asarray(trough_indices, dtype=int).ravel()
+    scores = np.asarray(beat_quality_scores, dtype=float).ravel()
+
+    fig = go.Figure()
+    if signal.size == 0 or len(troughs) < 2 or len(scores) == 0:
+        fig.update_layout(
+            template='plotly_dark',
+            width=630,
+            height=630,
+            title=title,
+            xaxis_title='Beat Phase (%)',
+            yaxis_title='Amplitude',
+        )
+        return fig, 0, 0
+
+    troughs = troughs[(troughs >= 0) & (troughs < signal.size)]
+    troughs = np.sort(troughs)
+    n_beats = min(len(scores), max(len(troughs) - 1, 0))
+    if n_beats <= 0:
+        fig.update_layout(
+            template='plotly_dark',
+            width=630,
+            height=630,
+            title=title,
+            xaxis_title='Beat Phase (%)',
+            yaxis_title='Amplitude',
+        )
+        return fig, 0, 0
+
+    valid_intervals = None
+    if include_intervals:
+        valid_intervals = []
+        for start_s, end_s in include_intervals:
+            s = max(0.0, float(start_s))
+            e = max(0.0, float(end_s))
+            if e > s:
+                valid_intervals.append((s, e))
+
+    def _in_selected_intervals(t):
+        if valid_intervals is None:
+            return True
+        for s, e in valid_intervals:
+            if s <= t < e:
+                return True
+        return False
+
+    candidate_count = 0
+    beats = []
+    for i in range(n_beats):
+        start_idx = int(troughs[i])
+        end_idx = int(troughs[i + 1])
+        if end_idx <= start_idx + 2:
+            continue
+        mid_t = ((start_idx + end_idx) * 0.5) / float(sampling_rate)
+        if not _in_selected_intervals(mid_t):
+            continue
+        candidate_count += 1
+        if not np.isfinite(scores[i]) or float(scores[i]) < float(quality_threshold):
+            continue
+        seg = signal[start_idx:end_idx]
+        x_old = np.linspace(0.0, 1.0, num=len(seg))
+        x_new = np.linspace(0.0, 1.0, num=int(target_len))
+        beat_resampled = np.interp(x_new, x_old, seg)
+        beats.append(beat_resampled)
+
+    selected = len(beats)
+    x_phase = np.linspace(0.0, 100.0, num=int(target_len))
+    if selected > 0:
+        beats_matrix = np.asarray(beats, dtype=float)
+        for idx, beat in enumerate(beats_matrix):
+            fig.add_trace(
+                go.Scatter(
+                    x=x_phase,
+                    y=beat,
+                    mode='lines',
+                    line=dict(color='rgba(190,190,190,0.35)', width=1),
+                    name='Accepted beats',
+                    showlegend=(idx == 0),
+                )
+            )
+        mean_beat = np.nanmean(beats_matrix, axis=0)
+        fig.add_trace(
+            go.Scatter(
+                x=x_phase,
+                y=mean_beat,
+                mode='lines',
+                line=dict(color='#00A8FF', width=3.2),
+                name='Average beat',
+            )
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref='paper',
+            yref='paper',
+            text='No beats pass the current quality threshold',
+            showarrow=False,
+            font=dict(color='rgba(220,220,220,0.9)'),
+        )
+
+    fig.update_layout(
+        template='plotly_dark',
+        width=630,
+        height=630,
+        title=title,
+        xaxis_title='Beat Phase (%)',
+        yaxis_title='Amplitude',
+        margin=dict(l=40, r=20, t=45, b=40),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0.0),
+    )
+    return fig, candidate_count, selected
+
+
+def get_doppler_overlay_groups(task_name, participant_label, signal_duration_s):
+    """Return task-specific beat-overlay figure groups as (title, intervals)."""
+    task_key = _resolve_task_key(task_name)
+    if task_key == 'sts':
+        return [
+            ('STS: 0-5 min', [(0, 5 * 60)]),
+            ('STS: 5-15 min', [(5 * 60, 15 * 60)]),
+        ]
+
+    if task_key == 'breath':
+        return [
+            ('Normal Pace', [(0, 60), (120, 180), (240, 300), (360, 420), (480, 540)]),
+            ('Fast Pace Breathing', [(60, 120), (300, 360)]),
+            ('Slow Pace Breathing', [(180, 240), (420, 480)]),
+        ]
+
+    if task_key == 'gas':
+        events = _resolve_task_events('gas', participant_label=participant_label)
+        if not events:
+            return []
+        events = sorted(events, key=lambda x: float(x[0]))
+        total_s = float(signal_duration_s)
+        label_to_intervals = {'air': [], 'hypercapnia': [], 'hypoxia': []}
+
+        for idx, (start_t, label, _) in enumerate(events):
+            start = max(0.0, float(start_t))
+            if idx + 1 < len(events):
+                end = float(events[idx + 1][0])
+            else:
+                end = total_s
+            end = min(end, total_s)
+            if end <= start:
+                continue
+            label_norm = str(label).strip().lower()
+            if 'air' in label_norm:
+                label_to_intervals['air'].append((start, end))
+            elif 'hypercapnia' in label_norm:
+                label_to_intervals['hypercapnia'].append((start, end))
+            elif 'hypoxia' in label_norm:
+                label_to_intervals['hypoxia'].append((start, end))
+
+        groups = []
+        if label_to_intervals['air']:
+            groups.append(('Normal (Air)', label_to_intervals['air']))
+        if label_to_intervals['hypercapnia']:
+            groups.append(('Hypercapnia', label_to_intervals['hypercapnia']))
+        if label_to_intervals['hypoxia']:
+            groups.append(('Hypoxia', label_to_intervals['hypoxia']))
+        return groups
+
+    return []
 
 
 def _resolve_task_key(task_name):
@@ -3442,7 +3817,7 @@ def main():
                     time = np.arange(len(result['filtered'])) / sampling_rate
 
                     # Calculate Aligned Metrics & HR
-                    from metrics.doppler import calculate_doppler_metrics
+                    from metrics.doppler import calculate_doppler_metrics, extract_template_and_score
                     from metrics.ecg import calculate_hr
 
                     doppler_data_4hz = calculate_doppler_metrics(
@@ -3458,6 +3833,24 @@ def main():
                         len(result['filtered']),
                         rate_method=st.session_state.doppler_params.get('rate_method', 'monotone_cubic')
                     )
+                    _, current_beat_scores = extract_template_and_score(
+                        result['filtered'],
+                        result['current_troughs']
+                    )
+                    noisy_windows, noisy_sample_mask = compute_doppler_noisy_windows(
+                        signal_length=len(result['filtered']),
+                        sampling_rate=sampling_rate,
+                        trough_indices=result['current_troughs'],
+                        beat_quality_scores=current_beat_scores,
+                        window_sec=10.0,
+                        step_sec=5.0,
+                        quality_threshold=0.8,
+                    )
+                    t_4hz = doppler_data_4hz.get('time_4hz', np.array([]))
+                    noisy_mask_4hz = np.zeros(len(t_4hz), dtype=bool)
+                    if len(t_4hz) > 0 and len(noisy_windows) > 0:
+                        for w_start, w_end in noisy_windows:
+                            noisy_mask_4hz |= (t_4hz >= w_start) & (t_4hz <= w_end)
 
                     # Zoom constraints
                     if 'doppler_region_start' not in st.session_state:
@@ -3474,10 +3867,67 @@ def main():
                         'DOPPLER',
                         bp_data=doppler_data_4hz,
                         hr_data=hr_from_doppler,
+                        beat_quality_scores=current_beat_scores,
+                        noisy_windows=noisy_windows,
+                        noisy_mask_4hz=noisy_mask_4hz,
                         ui_revision='doppler_plot',
                         zoom_range=doppler_zoom
                     )
+                    add_task_event_lines(
+                        fig,
+                        st.session_state.task,
+                        float(time[-1]),
+                        st.session_state.get('session'),
+                        st.session_state.get('participant'),
+                    )
                     st.plotly_chart(fig, use_container_width=True)
+                    noisy_pct = 100.0 * float(np.mean(noisy_sample_mask)) if len(noisy_sample_mask) > 0 else 0.0
+                    st.caption(
+                        f"Noisy data (10 s window, 5 s step, quality < 0.8): "
+                        f"{noisy_pct:.1f}% of the recording"
+                    )
+
+                    # High-quality beat overlay (left) + threshold control (right)
+                    beat_col, control_col = st.columns([3, 1])
+                    with control_col:
+                        beat_quality_threshold = st.number_input(
+                            "Beat quality cutoff",
+                            min_value=0.0,
+                            max_value=1.0,
+                            value=0.95,
+                            step=0.01,
+                            key='doppler_beat_quality_cutoff',
+                            help="Show beats with template-match quality at or above this value."
+                        )
+                    with beat_col:
+                        signal_duration_s = len(result['filtered']) / float(sampling_rate)
+                        overlay_groups = get_doppler_overlay_groups(
+                            st.session_state.get('task'),
+                            st.session_state.get('participant'),
+                            signal_duration_s,
+                        )
+                        if not overlay_groups:
+                            overlay_groups = [('High-Quality Beat Overlay', None)]
+
+                        fig_cols = st.columns(len(overlay_groups))
+                        for i, (group_title, group_intervals) in enumerate(overlay_groups):
+                            with fig_cols[i]:
+                                beat_fig, total_beats, kept_beats = create_doppler_beat_overlay_plot(
+                                    result['filtered'],
+                                    sampling_rate,
+                                    result['current_troughs'],
+                                    current_beat_scores,
+                                    quality_threshold=beat_quality_threshold,
+                                    target_len=200,
+                                    include_intervals=group_intervals,
+                                    title=group_title,
+                                )
+                                st.plotly_chart(beat_fig, use_container_width=False)
+                                st.caption(
+                                    f"Accepted beats: {kept_beats}/{total_beats} "
+                                    f"({(100.0 * kept_beats / total_beats):.1f}% )"
+                                    if total_beats > 0 else "Accepted beats: 0/0"
+                                )
 
                     # --- 4. STATISTICS SECTION ---
                     st.subheader("Statistics")

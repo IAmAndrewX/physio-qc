@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import subprocess
+import sys
+from pathlib import Path
 
 import streamlit.components.v1 as components
 
@@ -23,6 +26,11 @@ from neuro.file_server import register_file, clear_cache as clear_nifti_cache
 from neuro.masking import create_masked_volume
 from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2, doppler
 from utils import peak_editing, export
+
+try:
+    import scipy.io as sio
+except Exception:
+    sio = None
 
 
 @st.cache_data(show_spinner="Scanning data directory...")
@@ -70,6 +78,535 @@ CSS = """
 """
 
 st.markdown(CSS, unsafe_allow_html=True)
+
+
+REPORT_PROJECT_ROOT = Path("/export02/users/jwang/projects/report metrices generation")
+
+
+def _report_scripts_dir():
+    return REPORT_PROJECT_ROOT / "scripts"
+
+
+def _report_script_path(name):
+    p = _report_scripts_dir() / name
+    if not p.exists():
+        raise FileNotFoundError(f"Missing report script: {p}")
+    return str(p)
+
+
+def _report_run_cmd(cmd, cwd=None):
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc.returncode, proc.stdout
+
+
+def _report_safe_cell(x, maxlen=200):
+    if x is None:
+        return ""
+    if isinstance(x, np.ndarray) and x.ndim == 0:
+        try:
+            x = x.item()
+        except Exception:
+            pass
+    if isinstance(x, np.ndarray):
+        if x.size == 1:
+            try:
+                return _report_safe_cell(x.item(), maxlen=maxlen)
+            except Exception:
+                pass
+        return f"<array shape={x.shape} dtype={x.dtype}>"
+    if isinstance(x, (bytes, bytearray)):
+        try:
+            return x.decode("utf-8", errors="replace")
+        except Exception:
+            return str(x)
+    if isinstance(x, (int, float, np.integer, np.floating, bool)):
+        return x
+    s = str(x)
+    if len(s) > maxlen:
+        s = s[:maxlen] + "..."
+    return s
+
+
+def _report_load_mat_struct(mat_path):
+    if sio is None:
+        return {"error": "scipy is not available in this environment."}
+    if not mat_path.exists():
+        return {"error": f"File not found: {mat_path}"}
+
+    m = sio.loadmat(str(mat_path), squeeze_me=True, struct_as_record=False)
+
+    def to_py(obj):
+        if hasattr(obj, "_fieldnames"):
+            return {f: to_py(getattr(obj, f)) for f in obj._fieldnames}
+        if isinstance(obj, (list, tuple)):
+            return [to_py(x) for x in obj]
+        return obj
+
+    m2 = {k: v for k, v in m.items() if not k.startswith("__")}
+    if "whole" in m2:
+        return {"whole": to_py(m2["whole"])}
+    if "metrics_by_task" in m2:
+        return {"metrics_by_task": to_py(m2["metrics_by_task"])}
+    return {k: to_py(v) for k, v in m2.items()}
+
+
+def _report_dict_to_table(d, prefix=""):
+    rows = []
+
+    def rec(x, pfx):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                rec(v, f"{pfx}{k}.")
+        elif isinstance(x, (list, tuple)):
+            if len(x) > 50:
+                rows.append((pfx[:-1], f"<list len={len(x)}>"))
+            else:
+                for i, v in enumerate(x):
+                    rec(v, f"{pfx}{i}.")
+        else:
+            if isinstance(x, np.ndarray) and getattr(x, "size", 0) > 50:
+                rows.append((pfx[:-1], f"<array shape={x.shape} dtype={x.dtype}>"))
+            else:
+                rows.append((pfx[:-1], x))
+
+    rec(d, prefix)
+    df = pd.DataFrame(rows, columns=["key", "value"])
+    df["key"] = df["key"].astype("string")
+    df["value"] = df["value"].map(lambda x: str(_report_safe_cell(x))).astype("string")
+    return df
+
+
+def _report_show_status(task_key):
+    rc = st.session_state.get(f"report_rc_{task_key}", None)
+    if rc is None:
+        st.caption("Status: not run yet.")
+    elif rc == 0:
+        st.success("Status: success")
+    else:
+        st.error(f"Status: failed (rc={rc})")
+
+
+def _report_show_log(task_key):
+    log_txt = st.session_state.get(f"report_log_{task_key}", "")
+    with st.expander("Run log", expanded=False):
+        if log_txt:
+            st.code(log_txt)
+        else:
+            st.caption("No output yet.")
+
+
+def _report_show_figures(fig_items):
+    if not fig_items:
+        st.caption("No figures configured for this task.")
+        return
+    for p, cap in fig_items:
+        if p.exists():
+            st.image(str(p), caption=cap, width='stretch')
+        else:
+            st.info(f"Figure not found yet: {p}")
+
+
+def _report_show_metrics(mat_path):
+    if mat_path is None:
+        st.caption("No metrics file configured for this task.")
+        return
+    if not mat_path.exists():
+        st.info(f"Metrics not found yet: {mat_path}")
+        return
+    d = _report_load_mat_struct(mat_path)
+    df = _report_dict_to_table(d)
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
+def _report_find_task_file(base_root, participant, session, task):
+    # First try canonical resolver.
+    file_path = find_file_path(base_root, participant, session, task)
+    if file_path:
+        return file_path
+
+    # Fallback: case-insensitive / alias-based matching.
+    ses_dir = Path(base_root) / participant / session
+    if not ses_dir.exists():
+        return None
+
+    task_aliases = {
+        "rest": ["rest"],
+        "sts": ["sts", "sit", "stand", "sittostand"],
+        "breath": ["breath", "breathing", "breathe", "deepbreath", "deepbreathing"],
+        "valsalva": ["valsalva"],
+        "spirometry": ["spirometry", "spiro"],
+    }
+    aliases = task_aliases.get(str(task).strip().lower(), [str(task).strip().lower()])
+
+    all_acq = sorted(ses_dir.glob("*.acq"))
+    scored = []
+    for p in all_acq:
+        name = p.name.lower()
+        score = 0
+        for a in aliases:
+            if f"task-{a}" in name:
+                score = max(score, 3)
+            elif a in name:
+                score = max(score, 1)
+        if "physio" in name and score > 0:
+            score += 1
+        if score > 0:
+            scored.append((score, p))
+    if scored:
+        scored.sort(key=lambda x: (-x[0], x[1].name))
+        return str(scored[0][1])
+    return None
+
+
+def _report_detect_channels(base_root, participant, session, task):
+    """
+    Detect channels using the same Physio QC mapping logic (load_acq_file + SIGNAL_PATTERNS).
+    Returns one-based channel numbers for script arguments when possible.
+    """
+    file_path = _report_find_task_file(base_root, participant, session, task)
+    if not file_path:
+        return {"ok": False, "message": f"Could not find .acq file for task '{task}'", "channels": {}}
+    data = load_acq_file(file_path, participant=participant, session=session, task=task)
+    if data is None:
+        return {"ok": False, "message": f"Failed to load .acq file for task '{task}'", "channels": {}}
+
+    channels = data.get("channels", [])
+    mappings = data.get("signal_mappings", {})
+
+    out = {}
+    for sig in ("ecg", "bp", "ppg"):
+        col = mappings.get(sig)
+        if col and col in channels:
+            out[sig] = channels.index(col) + 1  # scripts expect one-based by default
+        else:
+            out[sig] = None
+    return {"ok": True, "message": "", "channels": out}
+
+
+def _report_render(participant, session):
+    st.title("LCS Physio Metrics Runner (REST / STS / Valsalva / Breathing / Spirometry)")
+    st.markdown("## this page is stil under construction")
+
+    py = sys.executable
+    sub = str(participant).replace("sub-", "")
+    ses = str(session).replace("ses-", "")
+
+    default_root = str(config.BASE_DATA_PATH)
+    default_out = str(REPORT_PROJECT_ROOT / "derived")
+
+    with st.container(border=True):
+        st.subheader("Subject / Paths")
+        c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1], vertical_alignment="center")
+        with c1:
+            root = st.text_input("Physio root", value=default_root, key="report_root")
+        with c2:
+            out_root = st.text_input("Output root", value=default_out, key="report_out_root")
+        with c3:
+            sub = st.text_input("Subject code", value=sub, key="report_sub")
+        with c4:
+            ses = st.text_input("Session", value=ses, key="report_ses")
+        with c5:
+            one_based = st.checkbox("Channels 1-based", value=True, key="report_one_based")
+
+    sub_id = f"sub-{sub}"
+    ses_id = f"ses-{ses}"
+    base_out = Path(out_root) / sub_id / ses_id
+
+    paths = {
+        "rest_mat": base_out / "rest" / "rest_metrics.mat",
+        "sts_mat": base_out / "sts" / "sts_metrics.mat",
+        "rest_hr_fig": base_out / "rest" / "resting_hr.png",
+        "rest_bp_fig": base_out / "rest" / "resting_BP.png",
+        "val_mat": base_out / "valsalva" / "valsalva_metrics.mat",
+        "breath_mat": base_out / "breathing" / "breathing_metrics.mat",
+        "spiro_mat": base_out / "spirometry" / "spirometry_metrics.mat",
+        "all_mat": base_out / f"{sub_id}_{ses_id}_all_metrics.mat",
+        "sts_fig": base_out / "sts" / "STS_HR_MAP.png",
+        "val_fig": base_out / "valsalva" / "valsalva_best_rep_hr.png",
+        "val_debug_fig": base_out / "valsalva" / "valsalva_debug_full_hr.png",
+        "breath_fig": base_out / "breathing" / "deep_breathing_HR_plot.png",
+        "spiro_fig": base_out / "spirometry" / "spirometry_summary.png",
+    }
+
+    common_flags = ["--one_based"] if one_based else []
+
+    with st.container(border=True):
+        st.markdown("## REST")
+        pcol, runcol, statcol = st.columns([2, 1, 2], vertical_alignment="center")
+        rest_detect = _report_detect_channels(root, sub_id, ses_id, "rest")
+        rest_ecg_ch = rest_detect["channels"].get("ecg")
+        rest_bp_ch = rest_detect["channels"].get("bp")
+        with pcol:
+            st.caption("Parameters")
+            if rest_ecg_ch is not None:
+                st.caption(f"Auto-detected ECG channel: {rest_ecg_ch}")
+            else:
+                st.warning("ECG channel not auto-detected.")
+            if rest_bp_ch is not None:
+                st.caption(f"Auto-detected BP channel: {rest_bp_ch}")
+            else:
+                st.warning("BP channel not auto-detected.")
+        with runcol:
+            if st.button("Run REST", key="report_btn_rest", width='stretch'):
+                if rest_ecg_ch is None or rest_bp_ch is None:
+                    st.error("REST run blocked: could not auto-detect ECG/BP channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_rest_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(rest_ecg_ch)),
+                    "--bp_ch", str(int(rest_bp_ch)),
+                ]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_rest"] = rc
+                st.session_state["report_log_rest"] = out
+        with statcol:
+            _report_show_status("rest")
+        _report_show_log("rest")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([
+                (paths["rest_hr_fig"], "REST: Derived HR"),
+                (paths["rest_bp_fig"], "REST: Derived SBP/DBP/MBP"),
+            ])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["rest_mat"])
+
+    with st.container(border=True):
+        st.markdown("## STS")
+        pcol, runcol, statcol = st.columns([2, 1, 2], vertical_alignment="center")
+        sts_detect = _report_detect_channels(root, sub_id, ses_id, "sts")
+        sts_ecg_ch = sts_detect["channels"].get("ecg")
+        sts_bp_ch = sts_detect["channels"].get("bp")
+        with pcol:
+            st.caption("Parameters")
+            if sts_ecg_ch is not None:
+                st.caption(f"Auto-detected ECG channel: {sts_ecg_ch}")
+            else:
+                st.warning("ECG channel not auto-detected.")
+            if sts_bp_ch is not None:
+                st.caption(f"Auto-detected BP channel: {sts_bp_ch}")
+            else:
+                st.warning("BP channel not auto-detected.")
+            use_height_corr = st.toggle("Apply Height Adjustment", value=False, key="report_sts_height_toggle")
+            sts_height = 0.0
+            if use_height_corr:
+                sts_height = st.number_input("Subject Height (cm)", min_value=0.0, max_value=250.0, value=170.0, key="report_sts_height")
+                st.caption(f"Correction: -{0.4 * sts_height:.1f} mmHg to standing MAP")
+        with runcol:
+            if st.button("Run STS", key="report_btn_sts", width='stretch'):
+                if sts_ecg_ch is None or sts_bp_ch is None:
+                    st.error("STS run blocked: could not auto-detect ECG/BP channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_sts_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(sts_ecg_ch)),
+                    "--bp_ch", str(int(sts_bp_ch)),
+                    "--height", str(sts_height),
+                ]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_sts"] = rc
+                st.session_state["report_log_sts"] = out
+        with statcol:
+            _report_show_status("sts")
+        _report_show_log("sts")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([(paths["sts_fig"], "STS: HR/MAP")])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["sts_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Valsalva")
+        val_detect = _report_detect_channels(root, sub_id, ses_id, "valsalva")
+        val_ecg_ch = val_detect["channels"].get("ecg")
+        val_ppg_ch = val_detect["channels"].get("ppg")
+        with st.expander("Parameters", expanded=True):
+            cA, cB, cC = st.columns(3, gap="large")
+            with cA:
+                val_trig_ch = st.number_input("Trigger channel (--trig_ch) [0 = auto]", min_value=0, value=0, step=1, key="report_val_trig_ch")
+                trig_patterns_csv = st.text_input(
+                    "Trigger patterns (--trig_patterns), comma-separated",
+                    value="trigger,trig,marker,event,sync",
+                    key="report_val_trig_patterns",
+                )
+                if val_ecg_ch is not None:
+                    st.caption(f"Auto-detected ECG channel: {val_ecg_ch}")
+                else:
+                    st.warning("ECG channel not auto-detected.")
+            with cB:
+                if val_ppg_ch is not None:
+                    st.caption(f"Auto-detected PPG channel: {val_ppg_ch}")
+                else:
+                    st.warning("PPG channel not auto-detected.")
+                val_force_ppg = st.checkbox("Force PPG (--force_ppg)", value=False, key="report_val_force_ppg")
+                val_fallback_ppg = st.checkbox("Fallback to PPG if ECG bad (--fallback_ppg)", value=False, key="report_val_fallback_ppg")
+            with cC:
+                val_hr_smooth_sec = st.number_input("HR smoothing sec for max/min (--hr_smooth_sec)", min_value=0.0, value=0.0, step=0.5, key="report_val_hr_smooth")
+                val_debug_plot = st.checkbox("Save debug plot (--debug_plot)", value=True, key="report_val_debug_plot")
+                val_ecg_debug_plot = st.checkbox("Save ECG/PPG peaks debug plot (--ecg_debug_plot)", value=False, key="report_val_ecg_debug_plot")
+
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Run VALSALVA", key="report_btn_val", width='stretch'):
+                if val_ecg_ch is None or val_ppg_ch is None:
+                    st.error("VALSALVA run blocked: could not auto-detect ECG/PPG channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_valsalva_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(val_ecg_ch)),
+                    "--ppg_ch", str(int(val_ppg_ch)),
+                    "--hr_smooth_sec", str(float(val_hr_smooth_sec)),
+                ]
+                if int(val_trig_ch) > 0:
+                    cmd += ["--trig_ch", str(int(val_trig_ch))]
+                pats = [p.strip() for p in (trig_patterns_csv or "").split(",") if p.strip()]
+                if pats:
+                    cmd += ["--trig_patterns", *pats]
+                if val_force_ppg:
+                    cmd += ["--force_ppg"]
+                if val_fallback_ppg:
+                    cmd += ["--fallback_ppg"]
+                if val_debug_plot:
+                    cmd += ["--debug_plot"]
+                if val_ecg_debug_plot:
+                    cmd += ["--ecg_debug_plot"]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_val"] = rc
+                st.session_state["report_log_val"] = out
+        with statcol:
+            _report_show_status("val")
+        _report_show_log("val")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([
+                (paths["val_fig"], "Valsalva: best repetition HR"),
+                (paths["val_debug_fig"], "Valsalva: debug full HR"),
+            ])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["val_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Breathing")
+        breath_detect = _report_detect_channels(root, sub_id, ses_id, "breath")
+        breath_ecg_ch = breath_detect["channels"].get("ecg")
+        breath_ppg_ch = breath_detect["channels"].get("ppg")
+        with st.expander("Parameters", expanded=True):
+            cA, cB, cC = st.columns(3, gap="large")
+            with cA:
+                if breath_ecg_ch is not None:
+                    st.caption(f"Auto-detected ECG channel: {breath_ecg_ch}")
+                else:
+                    st.warning("ECG channel not auto-detected.")
+                breath_start_min = st.number_input("Window start (min) (--win_start_min)", min_value=0.0, value=7.0, step=0.5, key="report_breath_start")
+                breath_end_min = st.number_input("Window end (min) (--win_end_min)", min_value=0.0, value=8.0, step=0.5, key="report_breath_end")
+            with cB:
+                if breath_ppg_ch is not None:
+                    st.caption(f"Auto-detected PPG channel: {breath_ppg_ch}")
+                else:
+                    st.warning("PPG channel not auto-detected.")
+                breath_force_ppg = st.checkbox("Force PPG (--force_ppg)", value=False, key="report_breath_force_ppg")
+            with cC:
+                st.checkbox("Save debug plot (--debug_plot)", value=True, key="report_breath_debug_plot")
+
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Run BREATHING", key="report_btn_breath", width='stretch'):
+                if breath_ecg_ch is None or breath_ppg_ch is None:
+                    st.error("BREATHING run blocked: could not auto-detect ECG/PPG channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_breathing_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(breath_ecg_ch)),
+                    "--win_start_min", str(float(breath_start_min)),
+                    "--win_end_min", str(float(breath_end_min)),
+                    "--ppg_ch", str(int(breath_ppg_ch)),
+                ]
+                if breath_force_ppg:
+                    cmd += ["--force_ppg"]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_breath"] = rc
+                st.session_state["report_log_breath"] = out
+        with statcol:
+            _report_show_status("breath")
+        _report_show_log("breath")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([(paths["breath_fig"], "Breathing: HR window with peaks/troughs")])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["breath_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Spirometry")
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Run SPIROMETRY", key="report_btn_spiro", width='stretch'):
+                cmd = [py, _report_script_path("run_spirometry_extract.py"), "--sub", sub, "--ses", ses, "--out_root", out_root]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_spiro"] = rc
+                st.session_state["report_log_spiro"] = out
+        with statcol:
+            _report_show_status("spiro")
+        _report_show_log("spiro")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([(paths["spiro_fig"], "Spirometry: summary")])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["spiro_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Merge task results")
+        st.caption("This merges per-task outputs into the single all-metrics .mat (no task re-processing).")
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("merge_tasks_results", key="report_btn_merge", width='stretch'):
+                cmd = [
+                    py, _report_script_path("merge_subject_all_metrics_only.py"),
+                    "--out_root", out_root, "--sub", sub, "--ses", ses,
+                ]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_merge"] = rc
+                st.session_state["report_log_merge"] = out
+        with statcol:
+            _report_show_status("merge")
+        _report_show_log("merge")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Outputs")
+            st.caption("Per-task figures are shown above in each task section.")
+            st.caption(f"Expected merged MAT: {paths['all_mat']}")
+        with right:
+            st.subheader("Merged metrics")
+            _report_show_metrics(paths["all_mat"])
 
 
 def init_session_state():
@@ -1878,9 +2415,19 @@ def main():
         session = st.selectbox("Session", sessions)
 
         tasks = participants_data[participant][session]
+        if "report" not in tasks:
+            tasks = tasks + ["report"]
         task = st.selectbox("Task", tasks)
 
         if st.button("Load Data", type="primary"):
+            if task == "report":
+                st.session_state.data_loaded = True
+                st.session_state.participant = participant
+                st.session_state.session = session
+                st.session_state.task = task
+                st.success("Report mode selected")
+                st.rerun()
+
             file_path = find_file_path(config.BASE_DATA_PATH, participant, session, task)
 
             if file_path is None:
@@ -1920,7 +2467,7 @@ def main():
 
             st.success(f"Loaded {file_path}")
 
-        if st.session_state.data_loaded:
+        if st.session_state.data_loaded and st.session_state.get('task') != 'report':
             data = st.session_state.loaded_data
             st.info(f"""
             **Samples**: {data['n_samples']:,}
@@ -1945,10 +2492,16 @@ def main():
         st.info("👈 Select data from the sidebar to begin")
         return
 
+    if st.session_state.get('task') == 'report':
+        _report_render(st.session_state.get('participant', ''), st.session_state.get('session', ''))
+        return
+
     data = st.session_state.loaded_data
     sampling_rate = data['sampling_rate']
     detected_signals = list(data['signal_mappings'].keys())
     session_a_selected = is_session_a_selected(st.session_state.session)
+    session_norm = str(st.session_state.session).strip().lower()
+    doppler_enabled = ('doppler' in detected_signals) and (session_norm not in {'ses-2', 'ses-4'})
 
     tabs = []
     if 'ecg' in detected_signals:
@@ -1967,7 +2520,7 @@ def main():
         tabs.append("ETO2")
     if 'spo2' in detected_signals:
         tabs.append("SpO2")
-    if 'doppler' in detected_signals:
+    if doppler_enabled:
         tabs.append("Doppler")
     if session_a_selected:
         tabs.append("Spirometry")
@@ -3734,7 +4287,7 @@ def main():
 
 
 
-    if 'doppler' in detected_signals:
+    if doppler_enabled:
             with tab_objects[tab_idx]:
                 st.header("Doppler Processing")
 

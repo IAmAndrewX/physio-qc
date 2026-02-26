@@ -12,6 +12,8 @@ import html
 import subprocess
 import sys
 from pathlib import Path
+import re
+import tempfile
 
 import streamlit.components.v1 as components
 
@@ -82,6 +84,8 @@ st.markdown(CSS, unsafe_allow_html=True)
 
 
 REPORT_PROJECT_ROOT = Path("/export02/users/jwang/projects/report metrices generation")
+REPORT_WORD_ASSETS_DIR = Path("/export02/users/jwang/projects/physio-qc/report_word_assets")
+REPORT_MATLAB_BIN = "/usr/local/bin/matlab"
 
 
 def _report_scripts_dir():
@@ -345,6 +349,12 @@ def _report_render(participant, session):
         rest_bp_ch = rest_detect["channels"].get("bp")
         with pcol:
             st.caption("Parameters")
+            rest_ecg_method = st.selectbox(
+                "ECG cleaning method",
+                [m for m in config.ECG_CLEANING_METHODS if m != "custom"],
+                index=0,
+                key="report_rest_ecg_method",
+            )
             if rest_ecg_ch is not None:
                 st.caption(f"Auto-detected ECG channel: {rest_ecg_ch}")
             else:
@@ -364,6 +374,7 @@ def _report_render(participant, session):
                     *common_flags, "--save", "--out_root", out_root,
                     "--ecg_ch", str(int(rest_ecg_ch)),
                     "--bp_ch", str(int(rest_bp_ch)),
+                    "--ecg_method", str(rest_ecg_method),
                 ]
                 rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
                 st.session_state["report_rc_rest"] = rc
@@ -391,6 +402,12 @@ def _report_render(participant, session):
         sts_bp_ch = sts_detect["channels"].get("bp")
         with pcol:
             st.caption("Parameters")
+            sts_ecg_method = st.selectbox(
+                "ECG cleaning method",
+                [m for m in config.ECG_CLEANING_METHODS if m != "custom"],
+                index=0,
+                key="report_sts_ecg_method",
+            )
             if sts_ecg_ch is not None:
                 st.caption(f"Auto-detected ECG channel: {sts_ecg_ch}")
             else:
@@ -415,6 +432,7 @@ def _report_render(participant, session):
                     *common_flags, "--save", "--out_root", out_root,
                     "--ecg_ch", str(int(sts_ecg_ch)),
                     "--bp_ch", str(int(sts_bp_ch)),
+                    "--ecg_method", str(sts_ecg_method),
                     "--height", str(sts_height),
                 ]
                 rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
@@ -440,6 +458,12 @@ def _report_render(participant, session):
         with st.expander("Parameters", expanded=True):
             cA, cB, cC = st.columns(3, gap="large")
             with cA:
+                val_ecg_method = st.selectbox(
+                    "ECG cleaning method",
+                    [m for m in config.ECG_CLEANING_METHODS if m != "custom"],
+                    index=0,
+                    key="report_val_ecg_method",
+                )
                 val_trig_ch = st.number_input("Trigger channel (--trig_ch) [0 = auto]", min_value=0, value=0, step=1, key="report_val_trig_ch")
                 trig_patterns_csv = st.text_input(
                     "Trigger patterns (--trig_patterns), comma-separated",
@@ -474,6 +498,7 @@ def _report_render(participant, session):
                     *common_flags, "--save", "--out_root", out_root,
                     "--ecg_ch", str(int(val_ecg_ch)),
                     "--ppg_ch", str(int(val_ppg_ch)),
+                    "--ecg_method", str(val_ecg_method),
                     "--hr_smooth_sec", str(float(val_hr_smooth_sec)),
                 ]
                 if int(val_trig_ch) > 0:
@@ -515,6 +540,12 @@ def _report_render(participant, session):
         with st.expander("Parameters", expanded=True):
             cA, cB, cC = st.columns(3, gap="large")
             with cA:
+                breath_ecg_method = st.selectbox(
+                    "ECG cleaning method",
+                    [m for m in config.ECG_CLEANING_METHODS if m != "custom"],
+                    index=0,
+                    key="report_breath_ecg_method",
+                )
                 if breath_ecg_ch is not None:
                     st.caption(f"Auto-detected ECG channel: {breath_ecg_ch}")
                 else:
@@ -541,6 +572,7 @@ def _report_render(participant, session):
                     "--root", root, "--sub", sub, "--ses", ses,
                     *common_flags, "--save", "--out_root", out_root,
                     "--ecg_ch", str(int(breath_ecg_ch)),
+                    "--ecg_method", str(breath_ecg_method),
                     "--win_start_min", str(float(breath_start_min)),
                     "--win_end_min", str(float(breath_end_min)),
                     "--ppg_ch", str(int(breath_ppg_ch)),
@@ -608,6 +640,81 @@ def _report_render(participant, session):
         with right:
             st.subheader("Merged metrics")
             _report_show_metrics(paths["all_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Generate Word Report (MATLAB)")
+        st.caption("One-click report generation using shared MATLAB assets in physio-qc.")
+        st.caption(f"Assets folder: {REPORT_WORD_ASSETS_DIR}")
+
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Generate Word Report", key="report_btn_generate_word", width='stretch'):
+                matlab_bin = REPORT_MATLAB_BIN
+                matlab_material_dir = REPORT_WORD_ASSETS_DIR
+                compile_script = matlab_material_dir / "new_compile_whole_python_v2.m"
+                if not compile_script.exists():
+                    st.session_state["report_rc_word"] = 1
+                    st.session_state["report_log_word"] = (
+                        f"Missing MATLAB script: {compile_script}\n"
+                        f"Please place new_compile_whole_python_v2.m and +myReports under {matlab_material_dir}"
+                    )
+                elif not Path(matlab_bin).exists():
+                    st.session_state["report_rc_word"] = 1
+                    st.session_state["report_log_word"] = f"MATLAB executable not found: {matlab_bin}"
+                else:
+                    base_dir = str(base_out.resolve())
+                    script_text = compile_script.read_text(encoding="utf-8")
+                    base_dir_esc = base_dir.replace("\\", "/")
+                    script_text = re.sub(
+                        r"(?m)^base_dir\s*=.*$",
+                        f"base_dir = '{base_dir_esc}';  % set by physio-qc report tab",
+                        script_text,
+                        count=1,
+                    )
+                    # Batch-safe: avoid GUI call in headless MATLAB.
+                    script_text = re.sub(
+                        r"(?m)^\s*rptview\('Subject1_Report\.docx'\);\s*$",
+                        "% rptview disabled in headless mode",
+                        script_text,
+                    )
+                    script_text += (
+                        "\ntry\n"
+                        "  src_doc = fullfile(pwd, 'Subject1_Report.docx');\n"
+                        "  if exist(src_doc, 'file')\n"
+                        "    dst_doc = fullfile(base_dir, sprintf('%s_%s_report.docx', get_sub_id(base_dir), get_ses_id(base_dir)));\n"
+                        "    movefile(src_doc, dst_doc, 'f');\n"
+                        "    fprintf('[OK] Saved report to %s\\n', dst_doc);\n"
+                        "  end\n"
+                        "catch ME\n"
+                        "  fprintf('[WARN] Could not move report docx: %s\\n', ME.message);\n"
+                        "end\n"
+                    )
+
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix="_compile_whole_runtime.m", delete=False, encoding="utf-8"
+                    ) as tf:
+                        tf.write(script_text)
+                        runtime_script = tf.name
+
+                    mm_dir_esc = str(Path(matlab_material_dir).resolve()).replace("\\", "/").replace("'", "''")
+                    runtime_script_esc = str(Path(runtime_script).resolve()).replace("\\", "/").replace("'", "''")
+                    batch_cmd = (
+                        f"try, addpath(genpath('{mm_dir_esc}')); run('{runtime_script_esc}'); "
+                        "catch ME, disp(getReport(ME, 'extended')); exit(1); end; exit(0);"
+                    )
+                    cmd = [matlab_bin, "-batch", batch_cmd]
+                    rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                    st.session_state["report_rc_word"] = rc
+                    st.session_state["report_log_word"] = out
+
+        with statcol:
+            _report_show_status("word")
+        _report_show_log("word")
+        expected_doc = base_out / f"{sub_id}_{ses_id}_report.docx"
+        if expected_doc.exists():
+            st.success(f"Report generated: {expected_doc}")
+        else:
+            st.caption(f"Expected report path: {expected_doc}")
 
 
 def init_session_state():

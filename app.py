@@ -9,6 +9,9 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import html
+import subprocess
+import sys
+from pathlib import Path
 
 import streamlit.components.v1 as components
 
@@ -24,6 +27,11 @@ from neuro.file_server import register_file, clear_cache as clear_nifti_cache
 from neuro.masking import create_masked_volume
 from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2, doppler
 from utils import peak_editing, export, subject_metadata
+
+try:
+    import scipy.io as sio
+except Exception:
+    sio = None
 
 
 @st.cache_data(show_spinner="Scanning data directory...")
@@ -71,6 +79,535 @@ CSS = """
 """
 
 st.markdown(CSS, unsafe_allow_html=True)
+
+
+REPORT_PROJECT_ROOT = Path("/export02/users/jwang/projects/report metrices generation")
+
+
+def _report_scripts_dir():
+    return REPORT_PROJECT_ROOT / "scripts"
+
+
+def _report_script_path(name):
+    p = _report_scripts_dir() / name
+    if not p.exists():
+        raise FileNotFoundError(f"Missing report script: {p}")
+    return str(p)
+
+
+def _report_run_cmd(cmd, cwd=None):
+    proc = subprocess.run(
+        cmd,
+        cwd=str(cwd) if cwd else None,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    return proc.returncode, proc.stdout
+
+
+def _report_safe_cell(x, maxlen=200):
+    if x is None:
+        return ""
+    if isinstance(x, np.ndarray) and x.ndim == 0:
+        try:
+            x = x.item()
+        except Exception:
+            pass
+    if isinstance(x, np.ndarray):
+        if x.size == 1:
+            try:
+                return _report_safe_cell(x.item(), maxlen=maxlen)
+            except Exception:
+                pass
+        return f"<array shape={x.shape} dtype={x.dtype}>"
+    if isinstance(x, (bytes, bytearray)):
+        try:
+            return x.decode("utf-8", errors="replace")
+        except Exception:
+            return str(x)
+    if isinstance(x, (int, float, np.integer, np.floating, bool)):
+        return x
+    s = str(x)
+    if len(s) > maxlen:
+        s = s[:maxlen] + "..."
+    return s
+
+
+def _report_load_mat_struct(mat_path):
+    if sio is None:
+        return {"error": "scipy is not available in this environment."}
+    if not mat_path.exists():
+        return {"error": f"File not found: {mat_path}"}
+
+    m = sio.loadmat(str(mat_path), squeeze_me=True, struct_as_record=False)
+
+    def to_py(obj):
+        if hasattr(obj, "_fieldnames"):
+            return {f: to_py(getattr(obj, f)) for f in obj._fieldnames}
+        if isinstance(obj, (list, tuple)):
+            return [to_py(x) for x in obj]
+        return obj
+
+    m2 = {k: v for k, v in m.items() if not k.startswith("__")}
+    if "whole" in m2:
+        return {"whole": to_py(m2["whole"])}
+    if "metrics_by_task" in m2:
+        return {"metrics_by_task": to_py(m2["metrics_by_task"])}
+    return {k: to_py(v) for k, v in m2.items()}
+
+
+def _report_dict_to_table(d, prefix=""):
+    rows = []
+
+    def rec(x, pfx):
+        if isinstance(x, dict):
+            for k, v in x.items():
+                rec(v, f"{pfx}{k}.")
+        elif isinstance(x, (list, tuple)):
+            if len(x) > 50:
+                rows.append((pfx[:-1], f"<list len={len(x)}>"))
+            else:
+                for i, v in enumerate(x):
+                    rec(v, f"{pfx}{i}.")
+        else:
+            if isinstance(x, np.ndarray) and getattr(x, "size", 0) > 50:
+                rows.append((pfx[:-1], f"<array shape={x.shape} dtype={x.dtype}>"))
+            else:
+                rows.append((pfx[:-1], x))
+
+    rec(d, prefix)
+    df = pd.DataFrame(rows, columns=["key", "value"])
+    df["key"] = df["key"].astype("string")
+    df["value"] = df["value"].map(lambda x: str(_report_safe_cell(x))).astype("string")
+    return df
+
+
+def _report_show_status(task_key):
+    rc = st.session_state.get(f"report_rc_{task_key}", None)
+    if rc is None:
+        st.caption("Status: not run yet.")
+    elif rc == 0:
+        st.success("Status: success")
+    else:
+        st.error(f"Status: failed (rc={rc})")
+
+
+def _report_show_log(task_key):
+    log_txt = st.session_state.get(f"report_log_{task_key}", "")
+    with st.expander("Run log", expanded=False):
+        if log_txt:
+            st.code(log_txt)
+        else:
+            st.caption("No output yet.")
+
+
+def _report_show_figures(fig_items):
+    if not fig_items:
+        st.caption("No figures configured for this task.")
+        return
+    for p, cap in fig_items:
+        if p.exists():
+            st.image(str(p), caption=cap, width='stretch')
+        else:
+            st.info(f"Figure not found yet: {p}")
+
+
+def _report_show_metrics(mat_path):
+    if mat_path is None:
+        st.caption("No metrics file configured for this task.")
+        return
+    if not mat_path.exists():
+        st.info(f"Metrics not found yet: {mat_path}")
+        return
+    d = _report_load_mat_struct(mat_path)
+    df = _report_dict_to_table(d)
+    st.dataframe(df, width='stretch', hide_index=True)
+
+
+def _report_find_task_file(base_root, participant, session, task):
+    # First try canonical resolver.
+    file_path = find_file_path(base_root, participant, session, task)
+    if file_path:
+        return file_path
+
+    # Fallback: case-insensitive / alias-based matching.
+    ses_dir = Path(base_root) / participant / session
+    if not ses_dir.exists():
+        return None
+
+    task_aliases = {
+        "rest": ["rest"],
+        "sts": ["sts", "sit", "stand", "sittostand"],
+        "breath": ["breath", "breathing", "breathe", "deepbreath", "deepbreathing"],
+        "valsalva": ["valsalva"],
+        "spirometry": ["spirometry", "spiro"],
+    }
+    aliases = task_aliases.get(str(task).strip().lower(), [str(task).strip().lower()])
+
+    all_acq = sorted(ses_dir.glob("*.acq"))
+    scored = []
+    for p in all_acq:
+        name = p.name.lower()
+        score = 0
+        for a in aliases:
+            if f"task-{a}" in name:
+                score = max(score, 3)
+            elif a in name:
+                score = max(score, 1)
+        if "physio" in name and score > 0:
+            score += 1
+        if score > 0:
+            scored.append((score, p))
+    if scored:
+        scored.sort(key=lambda x: (-x[0], x[1].name))
+        return str(scored[0][1])
+    return None
+
+
+def _report_detect_channels(base_root, participant, session, task):
+    """
+    Detect channels using the same Physio QC mapping logic (load_acq_file + SIGNAL_PATTERNS).
+    Returns one-based channel numbers for script arguments when possible.
+    """
+    file_path = _report_find_task_file(base_root, participant, session, task)
+    if not file_path:
+        return {"ok": False, "message": f"Could not find .acq file for task '{task}'", "channels": {}}
+    data = load_acq_file(file_path, participant=participant, session=session, task=task)
+    if data is None:
+        return {"ok": False, "message": f"Failed to load .acq file for task '{task}'", "channels": {}}
+
+    channels = data.get("channels", [])
+    mappings = data.get("signal_mappings", {})
+
+    out = {}
+    for sig in ("ecg", "bp", "ppg"):
+        col = mappings.get(sig)
+        if col and col in channels:
+            out[sig] = channels.index(col) + 1  # scripts expect one-based by default
+        else:
+            out[sig] = None
+    return {"ok": True, "message": "", "channels": out}
+
+
+def _report_render(participant, session):
+    st.title("LCS Physio Metrics Runner (REST / STS / Valsalva / Breathing / Spirometry)")
+    st.markdown("## this page is stil under construction")
+
+    py = sys.executable
+    sub = str(participant).replace("sub-", "")
+    ses = str(session).replace("ses-", "")
+
+    default_root = str(config.BASE_DATA_PATH)
+    default_out = str(REPORT_PROJECT_ROOT / "derived")
+
+    with st.container(border=True):
+        st.subheader("Subject / Paths")
+        c1, c2, c3, c4, c5 = st.columns([2, 1, 1, 1, 1], vertical_alignment="center")
+        with c1:
+            root = st.text_input("Physio root", value=default_root, key="report_root")
+        with c2:
+            out_root = st.text_input("Output root", value=default_out, key="report_out_root")
+        with c3:
+            sub = st.text_input("Subject code", value=sub, key="report_sub")
+        with c4:
+            ses = st.text_input("Session", value=ses, key="report_ses")
+        with c5:
+            one_based = st.checkbox("Channels 1-based", value=True, key="report_one_based")
+
+    sub_id = f"sub-{sub}"
+    ses_id = f"ses-{ses}"
+    base_out = Path(out_root) / sub_id / ses_id
+
+    paths = {
+        "rest_mat": base_out / "rest" / "rest_metrics.mat",
+        "sts_mat": base_out / "sts" / "sts_metrics.mat",
+        "rest_hr_fig": base_out / "rest" / "resting_hr.png",
+        "rest_bp_fig": base_out / "rest" / "resting_BP.png",
+        "val_mat": base_out / "valsalva" / "valsalva_metrics.mat",
+        "breath_mat": base_out / "breathing" / "breathing_metrics.mat",
+        "spiro_mat": base_out / "spirometry" / "spirometry_metrics.mat",
+        "all_mat": base_out / f"{sub_id}_{ses_id}_all_metrics.mat",
+        "sts_fig": base_out / "sts" / "STS_HR_MAP.png",
+        "val_fig": base_out / "valsalva" / "valsalva_best_rep_hr.png",
+        "val_debug_fig": base_out / "valsalva" / "valsalva_debug_full_hr.png",
+        "breath_fig": base_out / "breathing" / "deep_breathing_HR_plot.png",
+        "spiro_fig": base_out / "spirometry" / "spirometry_summary.png",
+    }
+
+    common_flags = ["--one_based"] if one_based else []
+
+    with st.container(border=True):
+        st.markdown("## REST")
+        pcol, runcol, statcol = st.columns([2, 1, 2], vertical_alignment="center")
+        rest_detect = _report_detect_channels(root, sub_id, ses_id, "rest")
+        rest_ecg_ch = rest_detect["channels"].get("ecg")
+        rest_bp_ch = rest_detect["channels"].get("bp")
+        with pcol:
+            st.caption("Parameters")
+            if rest_ecg_ch is not None:
+                st.caption(f"Auto-detected ECG channel: {rest_ecg_ch}")
+            else:
+                st.warning("ECG channel not auto-detected.")
+            if rest_bp_ch is not None:
+                st.caption(f"Auto-detected BP channel: {rest_bp_ch}")
+            else:
+                st.warning("BP channel not auto-detected.")
+        with runcol:
+            if st.button("Run REST", key="report_btn_rest", width='stretch'):
+                if rest_ecg_ch is None or rest_bp_ch is None:
+                    st.error("REST run blocked: could not auto-detect ECG/BP channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_rest_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(rest_ecg_ch)),
+                    "--bp_ch", str(int(rest_bp_ch)),
+                ]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_rest"] = rc
+                st.session_state["report_log_rest"] = out
+        with statcol:
+            _report_show_status("rest")
+        _report_show_log("rest")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([
+                (paths["rest_hr_fig"], "REST: Derived HR"),
+                (paths["rest_bp_fig"], "REST: Derived SBP/DBP/MBP"),
+            ])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["rest_mat"])
+
+    with st.container(border=True):
+        st.markdown("## STS")
+        pcol, runcol, statcol = st.columns([2, 1, 2], vertical_alignment="center")
+        sts_detect = _report_detect_channels(root, sub_id, ses_id, "sts")
+        sts_ecg_ch = sts_detect["channels"].get("ecg")
+        sts_bp_ch = sts_detect["channels"].get("bp")
+        with pcol:
+            st.caption("Parameters")
+            if sts_ecg_ch is not None:
+                st.caption(f"Auto-detected ECG channel: {sts_ecg_ch}")
+            else:
+                st.warning("ECG channel not auto-detected.")
+            if sts_bp_ch is not None:
+                st.caption(f"Auto-detected BP channel: {sts_bp_ch}")
+            else:
+                st.warning("BP channel not auto-detected.")
+            use_height_corr = st.toggle("Apply Height Adjustment", value=False, key="report_sts_height_toggle")
+            sts_height = 0.0
+            if use_height_corr:
+                sts_height = st.number_input("Subject Height (cm)", min_value=0.0, max_value=250.0, value=170.0, key="report_sts_height")
+                st.caption(f"Correction: -{0.4 * sts_height:.1f} mmHg to standing MAP")
+        with runcol:
+            if st.button("Run STS", key="report_btn_sts", width='stretch'):
+                if sts_ecg_ch is None or sts_bp_ch is None:
+                    st.error("STS run blocked: could not auto-detect ECG/BP channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_sts_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(sts_ecg_ch)),
+                    "--bp_ch", str(int(sts_bp_ch)),
+                    "--height", str(sts_height),
+                ]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_sts"] = rc
+                st.session_state["report_log_sts"] = out
+        with statcol:
+            _report_show_status("sts")
+        _report_show_log("sts")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([(paths["sts_fig"], "STS: HR/MAP")])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["sts_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Valsalva")
+        val_detect = _report_detect_channels(root, sub_id, ses_id, "valsalva")
+        val_ecg_ch = val_detect["channels"].get("ecg")
+        val_ppg_ch = val_detect["channels"].get("ppg")
+        with st.expander("Parameters", expanded=True):
+            cA, cB, cC = st.columns(3, gap="large")
+            with cA:
+                val_trig_ch = st.number_input("Trigger channel (--trig_ch) [0 = auto]", min_value=0, value=0, step=1, key="report_val_trig_ch")
+                trig_patterns_csv = st.text_input(
+                    "Trigger patterns (--trig_patterns), comma-separated",
+                    value="trigger,trig,marker,event,sync",
+                    key="report_val_trig_patterns",
+                )
+                if val_ecg_ch is not None:
+                    st.caption(f"Auto-detected ECG channel: {val_ecg_ch}")
+                else:
+                    st.warning("ECG channel not auto-detected.")
+            with cB:
+                if val_ppg_ch is not None:
+                    st.caption(f"Auto-detected PPG channel: {val_ppg_ch}")
+                else:
+                    st.warning("PPG channel not auto-detected.")
+                val_force_ppg = st.checkbox("Force PPG (--force_ppg)", value=False, key="report_val_force_ppg")
+                val_fallback_ppg = st.checkbox("Fallback to PPG if ECG bad (--fallback_ppg)", value=False, key="report_val_fallback_ppg")
+            with cC:
+                val_hr_smooth_sec = st.number_input("HR smoothing sec for max/min (--hr_smooth_sec)", min_value=0.0, value=0.0, step=0.5, key="report_val_hr_smooth")
+                val_debug_plot = st.checkbox("Save debug plot (--debug_plot)", value=True, key="report_val_debug_plot")
+                val_ecg_debug_plot = st.checkbox("Save ECG/PPG peaks debug plot (--ecg_debug_plot)", value=False, key="report_val_ecg_debug_plot")
+
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Run VALSALVA", key="report_btn_val", width='stretch'):
+                if val_ecg_ch is None or val_ppg_ch is None:
+                    st.error("VALSALVA run blocked: could not auto-detect ECG/PPG channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_valsalva_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(val_ecg_ch)),
+                    "--ppg_ch", str(int(val_ppg_ch)),
+                    "--hr_smooth_sec", str(float(val_hr_smooth_sec)),
+                ]
+                if int(val_trig_ch) > 0:
+                    cmd += ["--trig_ch", str(int(val_trig_ch))]
+                pats = [p.strip() for p in (trig_patterns_csv or "").split(",") if p.strip()]
+                if pats:
+                    cmd += ["--trig_patterns", *pats]
+                if val_force_ppg:
+                    cmd += ["--force_ppg"]
+                if val_fallback_ppg:
+                    cmd += ["--fallback_ppg"]
+                if val_debug_plot:
+                    cmd += ["--debug_plot"]
+                if val_ecg_debug_plot:
+                    cmd += ["--ecg_debug_plot"]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_val"] = rc
+                st.session_state["report_log_val"] = out
+        with statcol:
+            _report_show_status("val")
+        _report_show_log("val")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([
+                (paths["val_fig"], "Valsalva: best repetition HR"),
+                (paths["val_debug_fig"], "Valsalva: debug full HR"),
+            ])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["val_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Breathing")
+        breath_detect = _report_detect_channels(root, sub_id, ses_id, "breath")
+        breath_ecg_ch = breath_detect["channels"].get("ecg")
+        breath_ppg_ch = breath_detect["channels"].get("ppg")
+        with st.expander("Parameters", expanded=True):
+            cA, cB, cC = st.columns(3, gap="large")
+            with cA:
+                if breath_ecg_ch is not None:
+                    st.caption(f"Auto-detected ECG channel: {breath_ecg_ch}")
+                else:
+                    st.warning("ECG channel not auto-detected.")
+                breath_start_min = st.number_input("Window start (min) (--win_start_min)", min_value=0.0, value=7.0, step=0.5, key="report_breath_start")
+                breath_end_min = st.number_input("Window end (min) (--win_end_min)", min_value=0.0, value=8.0, step=0.5, key="report_breath_end")
+            with cB:
+                if breath_ppg_ch is not None:
+                    st.caption(f"Auto-detected PPG channel: {breath_ppg_ch}")
+                else:
+                    st.warning("PPG channel not auto-detected.")
+                breath_force_ppg = st.checkbox("Force PPG (--force_ppg)", value=False, key="report_breath_force_ppg")
+            with cC:
+                st.checkbox("Save debug plot (--debug_plot)", value=True, key="report_breath_debug_plot")
+
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Run BREATHING", key="report_btn_breath", width='stretch'):
+                if breath_ecg_ch is None or breath_ppg_ch is None:
+                    st.error("BREATHING run blocked: could not auto-detect ECG/PPG channels.")
+                    st.stop()
+                cmd = [
+                    py, _report_script_path("run_breathing_acq.py"),
+                    "--root", root, "--sub", sub, "--ses", ses,
+                    *common_flags, "--save", "--out_root", out_root,
+                    "--ecg_ch", str(int(breath_ecg_ch)),
+                    "--win_start_min", str(float(breath_start_min)),
+                    "--win_end_min", str(float(breath_end_min)),
+                    "--ppg_ch", str(int(breath_ppg_ch)),
+                ]
+                if breath_force_ppg:
+                    cmd += ["--force_ppg"]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_breath"] = rc
+                st.session_state["report_log_breath"] = out
+        with statcol:
+            _report_show_status("breath")
+        _report_show_log("breath")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([(paths["breath_fig"], "Breathing: HR window with peaks/troughs")])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["breath_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Spirometry")
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("Run SPIROMETRY", key="report_btn_spiro", width='stretch'):
+                cmd = [py, _report_script_path("run_spirometry_extract.py"), "--sub", sub, "--ses", ses, "--out_root", out_root]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_spiro"] = rc
+                st.session_state["report_log_spiro"] = out
+        with statcol:
+            _report_show_status("spiro")
+        _report_show_log("spiro")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Figures")
+            _report_show_figures([(paths["spiro_fig"], "Spirometry: summary")])
+        with right:
+            st.subheader("Metrics")
+            _report_show_metrics(paths["spiro_mat"])
+
+    with st.container(border=True):
+        st.markdown("## Merge task results")
+        st.caption("This merges per-task outputs into the single all-metrics .mat (no task re-processing).")
+        runcol, statcol = st.columns([1, 2], vertical_alignment="center")
+        with runcol:
+            if st.button("merge_tasks_results", key="report_btn_merge", width='stretch'):
+                cmd = [
+                    py, _report_script_path("merge_subject_all_metrics_only.py"),
+                    "--out_root", out_root, "--sub", sub, "--ses", ses,
+                ]
+                rc, out = _report_run_cmd(cmd, cwd=REPORT_PROJECT_ROOT)
+                st.session_state["report_rc_merge"] = rc
+                st.session_state["report_log_merge"] = out
+        with statcol:
+            _report_show_status("merge")
+        _report_show_log("merge")
+        st.divider()
+        left, right = st.columns(2, gap="large")
+        with left:
+            st.subheader("Outputs")
+            st.caption("Per-task figures are shown above in each task section.")
+            st.caption(f"Expected merged MAT: {paths['all_mat']}")
+        with right:
+            st.subheader("Merged metrics")
+            _report_show_metrics(paths["all_mat"])
 
 
 def init_session_state():
@@ -318,12 +855,20 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
                        signal_name, rate_interpolated=None, rate_bpm=None,
                        bp_data=None, hr_data=None, ui_revision='constant',
                        zoom_range=None, calibration_regions=None, rvt_data=None,
-                       phase_data=None):
+                       phase_data=None, beat_quality_scores=None,
+                       noisy_windows=None, noisy_mask_4hz=None):
     """Create 3 or 4-panel plot for RSP/BP with synchronized zooming"""
     signal_key = str(signal_name).strip().lower()
     is_bp = signal_key == 'bp'
+    is_doppler = signal_key == 'doppler'
     has_rvt = rvt_data is not None and not is_bp
     has_phase = phase_data is not None and not is_bp
+    has_beat_quality = (
+        is_doppler and
+        beat_quality_scores is not None and
+        len(beat_quality_scores) > 0 and
+        len(current_troughs) > 1
+    )
 
     if is_bp:
         labels = {
@@ -380,8 +925,12 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     else:
         titles.append(f'{signal_name} Rate')
 
-    # Enable secondary y-axis on row 2 for phase overlay
-    specs = [[{"secondary_y": (i == 1 and has_phase)}] for i in range(n_rows)]
+    # Enable secondary y-axis for phase/quality overlays.
+    specs = [[{"secondary_y": False}] for _ in range(n_rows)]
+    if n_rows >= 1 and has_beat_quality:
+        specs[0][0]["secondary_y"] = True
+    if n_rows >= 2 and (has_phase or has_beat_quality):
+        specs[1][0]["secondary_y"] = True
 
 
     fig = make_subplots(
@@ -413,6 +962,60 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             name=labels['troughs'], marker=dict(color='#4444FF', size=8)
         ), row=2, col=1)
 
+    # Doppler beat-wise quality overlay: horizontal segment per beat.
+    if has_beat_quality:
+        troughs = np.asarray(current_troughs, dtype=int)
+        troughs = troughs[(troughs >= 0) & (troughs < len(time))]
+        troughs = np.sort(troughs)
+        scores = np.asarray(beat_quality_scores, dtype=float).ravel()
+        n_segments = min(len(scores), max(len(troughs) - 1, 0))
+
+        x_quality = []
+        y_quality = []
+        for i in range(n_segments):
+            start_idx, end_idx = int(troughs[i]), int(troughs[i + 1])
+            if end_idx <= start_idx:
+                continue
+            score = float(scores[i])
+            x_quality.extend([time[start_idx], time[end_idx], None])
+            y_quality.extend([score, score, None])
+
+        if x_quality:
+            quality_style = dict(color='#FFD166', width=1.8, dash='dot')
+            fig.add_trace(
+                go.Scatter(
+                    x=x_quality,
+                    y=y_quality,
+                    mode='lines',
+                    name='Beat Quality',
+                    line=quality_style,
+                    opacity=0.85,
+                ),
+                row=1, col=1, secondary_y=True
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=x_quality,
+                    y=y_quality,
+                    mode='lines',
+                    name='Beat Quality',
+                    line=quality_style,
+                    opacity=0.85,
+                    showlegend=False,
+                ),
+                row=2, col=1, secondary_y=True
+            )
+            fig.update_yaxes(
+                title_text='Beat Quality (0-1)',
+                range=[0, 1.05],
+                row=1, col=1, secondary_y=True
+            )
+            fig.update_yaxes(
+                title_text='Beat Quality (0-1)',
+                range=[0, 1.05],
+                row=2, col=1, secondary_y=True
+            )
+
     # Phase overlay on row 2 (secondary y-axis, 0-1)
     if has_phase:
         fig.add_trace(go.Scatter(
@@ -441,9 +1044,55 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     if is_bp_like and bp_data is not None:
     #if is_bp and bp_data is not None:
         t_4hz = bp_data['time_4hz']
-        fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
-        fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
+        if is_doppler and noisy_mask_4hz is not None and len(noisy_mask_4hz) == len(t_4hz):
+            noisy_mask_4hz = np.asarray(noisy_mask_4hz, dtype=bool)
+            has_noisy = bool(np.any(noisy_mask_4hz))
+            if has_noisy:
+                sbp_clean = np.where(~noisy_mask_4hz, bp_data['sbp_4hz'], np.nan)
+                map_clean = np.where(~noisy_mask_4hz, bp_data['map_4hz'], np.nan)
+                dbp_clean = np.where(~noisy_mask_4hz, bp_data['dbp_4hz'], np.nan)
+                sbp_noisy = np.where(noisy_mask_4hz, bp_data['sbp_4hz'], np.nan)
+                map_noisy = np.where(noisy_mask_4hz, bp_data['map_4hz'], np.nan)
+                dbp_noisy = np.where(noisy_mask_4hz, bp_data['dbp_4hz'], np.nan)
+
+                # Clean sections keep default visual emphasis.
+                fig.add_trace(go.Scatter(x=t_4hz, y=sbp_clean, name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=map_clean, name='MAP', line=dict(color='green', width=2)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=dbp_clean, name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
+
+                # Noisy sections are thinner and more transparent dashed overlays.
+                fig.add_trace(
+                    go.Scatter(
+                        x=t_4hz, y=sbp_noisy, name='SBP (Noisy)',
+                        line=dict(color='red', width=1.0, dash='dash'),
+                        opacity=0.4
+                    ),
+                    row=3, col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=t_4hz, y=map_noisy, name='MAP (Noisy)',
+                        line=dict(color='green', width=1.2, dash='dash'),
+                        opacity=0.4
+                    ),
+                    row=3, col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=t_4hz, y=dbp_noisy, name='DBP (Noisy)',
+                        line=dict(color='blue', width=1.0, dash='dash'),
+                        opacity=0.4
+                    ),
+                    row=3, col=1
+                )
+            else:
+                fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
+                fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
+        else:
+            fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['sbp_4hz'], name='SBP', line=dict(color='red', width=1.5)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['map_4hz'], name='MAP', line=dict(color='green', width=2)), row=3, col=1)
+            fig.add_trace(go.Scatter(x=t_4hz, y=bp_data['dbp_4hz'], name='DBP', line=dict(color='blue', width=1.5)), row=3, col=1)
     elif rate_interpolated is not None:
         fig.add_trace(
             go.Scatter(x=time, y=rate_interpolated, name=labels['rate'], line=dict(color='#FF6B6B', width=2)),
@@ -505,9 +1154,272 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     if zoom_range is not None:
         fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
 
+    # Highlight Doppler noisy windows across all panels.
+    if is_doppler and noisy_windows:
+        for x0, x1 in noisy_windows:
+            if x1 > x0:
+                fig.add_vrect(
+                    x0=float(x0),
+                    x1=float(x1),
+                    fillcolor='rgba(255, 99, 71, 0.14)',
+                    line_width=0,
+                    layer='below',
+                    row='all',
+                    col=1
+                )
+
     fig.update_layout(height=height, template='plotly_dark', showlegend=True, hovermode='x unified', uirevision=ui_revision)
     fig.update_traces(connectgaps=False)
     return fig
+
+
+def compute_doppler_noisy_windows(
+    signal_length,
+    sampling_rate,
+    trough_indices,
+    beat_quality_scores,
+    window_sec=10.0,
+    step_sec=5.0,
+    quality_threshold=0.8,
+):
+    """
+    Classify noisy Doppler windows from beat-wise quality.
+
+    Beat quality is treated as piecewise-constant between consecutive troughs.
+    A window is noisy when its time-weighted mean quality is below threshold.
+    """
+    if signal_length <= 0 or sampling_rate <= 0:
+        return [], np.zeros(0, dtype=bool)
+
+    noisy_mask = np.zeros(int(signal_length), dtype=bool)
+    troughs = np.asarray(trough_indices, dtype=int).ravel()
+    scores = np.asarray(beat_quality_scores, dtype=float).ravel()
+
+    if len(troughs) < 2 or len(scores) == 0:
+        return [], noisy_mask
+
+    troughs = troughs[(troughs >= 0) & (troughs < signal_length)]
+    troughs = np.sort(troughs)
+    n_beats = min(len(scores), max(len(troughs) - 1, 0))
+    if n_beats <= 0:
+        return [], noisy_mask
+
+    beat_starts = troughs[:n_beats] / float(sampling_rate)
+    beat_ends = troughs[1:n_beats + 1] / float(sampling_rate)
+    beat_scores = scores[:n_beats]
+
+    duration = max(0.0, (float(signal_length) - 1.0) / float(sampling_rate))
+    if duration <= 0:
+        return [], noisy_mask
+
+    win = float(window_sec)
+    step = float(step_sec)
+    if win <= 0 or step <= 0:
+        return [], noisy_mask
+
+    noisy_windows = []
+    start_t = 0.0
+    while start_t < duration:
+        end_t = min(start_t + win, duration)
+        if end_t <= start_t:
+            break
+
+        overlap_start = np.maximum(beat_starts, start_t)
+        overlap_end = np.minimum(beat_ends, end_t)
+        overlap = np.maximum(0.0, overlap_end - overlap_start)
+
+        if np.any(overlap > 0):
+            w = overlap
+            q_mean = float(np.nansum(beat_scores * w) / np.nansum(w))
+            if np.isfinite(q_mean) and q_mean < quality_threshold:
+                noisy_windows.append((start_t, end_t))
+                i0 = max(0, int(np.floor(start_t * sampling_rate)))
+                i1 = min(signal_length, int(np.ceil(end_t * sampling_rate)))
+                if i1 > i0:
+                    noisy_mask[i0:i1] = True
+
+        start_t += step
+
+    return noisy_windows, noisy_mask
+
+
+def create_doppler_beat_overlay_plot(
+    signal,
+    sampling_rate,
+    trough_indices,
+    beat_quality_scores,
+    quality_threshold=0.95,
+    target_len=200,
+    include_intervals=None,
+    title='High-Quality Beat Overlay',
+):
+    """Plot accepted Doppler beats (gray) and their average waveform (blue)."""
+    signal = np.asarray(signal) if signal is not None else np.asarray([])
+    troughs = np.asarray(trough_indices, dtype=int).ravel()
+    scores = np.asarray(beat_quality_scores, dtype=float).ravel()
+
+    fig = go.Figure()
+    if signal.size == 0 or len(troughs) < 2 or len(scores) == 0:
+        fig.update_layout(
+            template='plotly_dark',
+            width=630,
+            height=630,
+            title=title,
+            xaxis_title='Beat Phase (%)',
+            yaxis_title='Amplitude',
+        )
+        return fig, 0, 0
+
+    troughs = troughs[(troughs >= 0) & (troughs < signal.size)]
+    troughs = np.sort(troughs)
+    n_beats = min(len(scores), max(len(troughs) - 1, 0))
+    if n_beats <= 0:
+        fig.update_layout(
+            template='plotly_dark',
+            width=630,
+            height=630,
+            title=title,
+            xaxis_title='Beat Phase (%)',
+            yaxis_title='Amplitude',
+        )
+        return fig, 0, 0
+
+    valid_intervals = None
+    if include_intervals:
+        valid_intervals = []
+        for start_s, end_s in include_intervals:
+            s = max(0.0, float(start_s))
+            e = max(0.0, float(end_s))
+            if e > s:
+                valid_intervals.append((s, e))
+
+    def _in_selected_intervals(t):
+        if valid_intervals is None:
+            return True
+        for s, e in valid_intervals:
+            if s <= t < e:
+                return True
+        return False
+
+    candidate_count = 0
+    beats = []
+    for i in range(n_beats):
+        start_idx = int(troughs[i])
+        end_idx = int(troughs[i + 1])
+        if end_idx <= start_idx + 2:
+            continue
+        mid_t = ((start_idx + end_idx) * 0.5) / float(sampling_rate)
+        if not _in_selected_intervals(mid_t):
+            continue
+        candidate_count += 1
+        if not np.isfinite(scores[i]) or float(scores[i]) < float(quality_threshold):
+            continue
+        seg = signal[start_idx:end_idx]
+        x_old = np.linspace(0.0, 1.0, num=len(seg))
+        x_new = np.linspace(0.0, 1.0, num=int(target_len))
+        beat_resampled = np.interp(x_new, x_old, seg)
+        beats.append(beat_resampled)
+
+    selected = len(beats)
+    x_phase = np.linspace(0.0, 100.0, num=int(target_len))
+    if selected > 0:
+        beats_matrix = np.asarray(beats, dtype=float)
+        for idx, beat in enumerate(beats_matrix):
+            fig.add_trace(
+                go.Scatter(
+                    x=x_phase,
+                    y=beat,
+                    mode='lines',
+                    line=dict(color='rgba(190,190,190,0.35)', width=1),
+                    name='Accepted beats',
+                    showlegend=(idx == 0),
+                )
+            )
+        mean_beat = np.nanmean(beats_matrix, axis=0)
+        fig.add_trace(
+            go.Scatter(
+                x=x_phase,
+                y=mean_beat,
+                mode='lines',
+                line=dict(color='#00A8FF', width=3.2),
+                name='Average beat',
+            )
+        )
+    else:
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref='paper',
+            yref='paper',
+            text='No beats pass the current quality threshold',
+            showarrow=False,
+            font=dict(color='rgba(220,220,220,0.9)'),
+        )
+
+    fig.update_layout(
+        template='plotly_dark',
+        width=630,
+        height=630,
+        title=title,
+        xaxis_title='Beat Phase (%)',
+        yaxis_title='Amplitude',
+        margin=dict(l=40, r=20, t=45, b=40),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0.0),
+    )
+    return fig, candidate_count, selected
+
+
+def get_doppler_overlay_groups(task_name, participant_label, signal_duration_s):
+    """Return task-specific beat-overlay figure groups as (title, intervals)."""
+    task_key = _resolve_task_key(task_name)
+    if task_key == 'sts':
+        return [
+            ('STS: 0-5 min', [(0, 5 * 60)]),
+            ('STS: 5-15 min', [(5 * 60, 15 * 60)]),
+        ]
+
+    if task_key == 'breath':
+        return [
+            ('Normal Pace', [(0, 60), (120, 180), (240, 300), (360, 420), (480, 540)]),
+            ('Fast Pace Breathing', [(60, 120), (300, 360)]),
+            ('Slow Pace Breathing', [(180, 240), (420, 480)]),
+        ]
+
+    if task_key == 'gas':
+        events = _resolve_task_events('gas', participant_label=participant_label)
+        if not events:
+            return []
+        events = sorted(events, key=lambda x: float(x[0]))
+        total_s = float(signal_duration_s)
+        label_to_intervals = {'air': [], 'hypercapnia': [], 'hypoxia': []}
+
+        for idx, (start_t, label, _) in enumerate(events):
+            start = max(0.0, float(start_t))
+            if idx + 1 < len(events):
+                end = float(events[idx + 1][0])
+            else:
+                end = total_s
+            end = min(end, total_s)
+            if end <= start:
+                continue
+            label_norm = str(label).strip().lower()
+            if 'air' in label_norm:
+                label_to_intervals['air'].append((start, end))
+            elif 'hypercapnia' in label_norm:
+                label_to_intervals['hypercapnia'].append((start, end))
+            elif 'hypoxia' in label_norm:
+                label_to_intervals['hypoxia'].append((start, end))
+
+        groups = []
+        if label_to_intervals['air']:
+            groups.append(('Normal (Air)', label_to_intervals['air']))
+        if label_to_intervals['hypercapnia']:
+            groups.append(('Hypercapnia', label_to_intervals['hypercapnia']))
+        if label_to_intervals['hypoxia']:
+            groups.append(('Hypoxia', label_to_intervals['hypoxia']))
+        return groups
+
+    return []
 
 
 def _resolve_task_key(task_name):
@@ -1675,9 +2587,19 @@ def main():
         session = st.selectbox("Session", sessions)
 
         tasks = participants_data[participant][session]
+        if "report" not in tasks:
+            tasks = tasks + ["report"]
         task = st.selectbox("Task", tasks)
 
         if st.button("Load Data", type="primary"):
+            if task == "report":
+                st.session_state.data_loaded = True
+                st.session_state.participant = participant
+                st.session_state.session = session
+                st.session_state.task = task
+                st.success("Report mode selected")
+                st.rerun()
+
             file_path = find_file_path(config.BASE_DATA_PATH, participant, session, task)
 
             if file_path is None:
@@ -1727,7 +2649,7 @@ def main():
 
             st.success(f"Loaded {file_path}")
 
-        if st.session_state.data_loaded:
+        if st.session_state.data_loaded and st.session_state.get('task') != 'report':
             data = st.session_state.loaded_data
             st.info(f"""
             **Samples**: {data['n_samples']:,}
@@ -1754,6 +2676,10 @@ def main():
         st.info("👈 Select data from the sidebar to begin")
         return
 
+    if st.session_state.get('task') == 'report':
+        _report_render(st.session_state.get('participant', ''), st.session_state.get('session', ''))
+        return
+
     data = st.session_state.loaded_data
     sampling_rate = data['sampling_rate']
     detected_signals = list(data['signal_mappings'].keys())
@@ -1767,6 +2693,9 @@ def main():
             )
         except Exception:
             st.session_state.subject_metadata = None
+
+    session_norm = str(st.session_state.session).strip().lower()
+    doppler_enabled = ('doppler' in detected_signals) and (session_norm not in {'ses-2', 'ses-4'})
 
     tabs = ["Metadata"]
     if 'ecg' in detected_signals:
@@ -1785,7 +2714,7 @@ def main():
         tabs.append("ETO2")
     if 'spo2' in detected_signals:
         tabs.append("SpO2")
-    if 'doppler' in detected_signals:
+    if doppler_enabled:
         tabs.append("Doppler")
     if session_a_selected:
         tabs.append("Spirometry")
@@ -3562,148 +4491,223 @@ def main():
 
 
 
-    if 'doppler' in detected_signals:
+    if doppler_enabled:
         with tab_objects[tab_idx]:
-                st.header("Doppler Processing")
-                render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
+            st.header("Doppler Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
-                # --- 1. UI FOR FILTER PARAMS ---
-                col1, col2, col3 = st.columns(3)
+            # --- 1. UI FOR FILTER PARAMS ---
+            col1, col2, col3 = st.columns(3)
 
+            with col1:
+                filter_method = st.selectbox(
+                    "Filter Method", 
+                    ['sg_wavelet', 'bessel_25hz', 'butterworth', 'custom'], 
+                    index=0, 
+                    key='doppler_filter'
+                )   
+                # Hardcoding Peak Detection to Delineator
+                peak_method = 'delineator' 
+                st.info("Peak Detection locked to 'Delineator'.")
+
+            with col2:
+                if filter_method == 'sg_wavelet':
+                    sg_win = st.number_input("SG Window (s)", value=0.1, step=0.05, key='dopp_sg')
+                    wavelet = st.selectbox("Wavelet Type", ['db6', 'sym8', 'db4'], index=0, key='dopp_wav')
+                    level = st.number_input("Decomp Level", min_value=1, max_value=12, value=10, key='dopp_lvl')
+                else:
+                    st.info("Standard method parameters applied.")
+
+            with col3:
+                if filter_method == 'sg_wavelet':
+                    alpha = st.number_input("IQR Alpha (Spikes)", value=4.0, step=0.5, key='dopp_alpha')
+                    drop_levels = st.number_input("Drop Fine Levels", min_value=0, max_value=4, value=1, key='dopp_drop')
+
+            # --- 2. EXECUTE PROCESSING ---
+            if st.button("Process Doppler", type="primary"):
+                signal = data['df'][data['signal_mappings']['doppler']].values
+
+                # Build params dictionary dynamically
+                params = {
+                    'filter_method': filter_method,
+                    'peak_method': peak_method,
+                }
+                if filter_method == 'sg_wavelet':
+                    params.update({
+                        'sg_win': sg_win,
+                        'wavelet': wavelet,
+                        'level': level,
+                        'alpha': alpha,
+                        'drop_levels': drop_levels
+                    })
+
+                st.session_state.doppler_params.update(params)
+
+                # Execute pipeline
+                result = doppler.process_doppler(signal, sampling_rate, st.session_state.doppler_params)
+
+                if result is None:
+                    st.error("Processing failed: insufficient peaks detected.")
+                else:
+                    st.session_state.doppler_result = result
+                    st.success("Doppler processed successfully.")
+
+            # --- 3. DISPLAY RESULTS ---
+            if st.session_state.doppler_result is not None:
+                result = st.session_state.doppler_result
+
+                st.subheader("Manual Doppler Editing")
+
+                # Peak/Trough Editing Stats
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    filter_method = st.selectbox(
-                        "Filter Method", 
-                        ['sg_wavelet', 'bessel_25hz', 'butterworth', 'custom'], 
-                        index=0, 
-                        key='doppler_filter'
-                    )   
-                    # Hardcoding Peak Detection to Delineator
-                    peak_method = 'delineator' 
-                    st.info("Peak Detection locked to 'Delineator'.")
-
+                    st.metric("Auto Peaks", len(result['auto_peaks']))
                 with col2:
-                    if filter_method == 'sg_wavelet':
-                        sg_win = st.number_input("SG Window (s)", value=0.1, step=0.05, key='dopp_sg')
-                        wavelet = st.selectbox("Wavelet Type", ['db6', 'sym8', 'db4'], index=0, key='dopp_wav')
-                        level = st.number_input("Decomp Level", min_value=1, max_value=12, value=10, key='dopp_lvl')
-                    else:
-                        st.info("Standard method parameters applied.")
-
+                    st.metric("Auto Troughs", len(result['auto_troughs']))
                 with col3:
-                    if filter_method == 'sg_wavelet':
-                        alpha = st.number_input("IQR Alpha (Spikes)", value=4.0, step=0.5, key='dopp_alpha')
-                        drop_levels = st.number_input("Drop Fine Levels", min_value=0, max_value=4, value=1, key='dopp_drop')
+                    n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
+                    st.metric("Added Peaks", n_added_peaks)
+                with col4:
+                    n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
+                    st.metric("Added Troughs", n_added_troughs)
 
-                # --- 2. EXECUTE PROCESSING ---
-                if st.button("Process Doppler", type="primary"):
-                    signal = data['df'][data['signal_mappings']['doppler']].values
+                # Time Array
+                time = np.arange(len(result['filtered'])) / sampling_rate
 
-                    # Build params dictionary dynamically
-                    params = {
-                        'filter_method': filter_method,
-                        'peak_method': peak_method,
-                    }
-                    if filter_method == 'sg_wavelet':
-                        params.update({
-                            'sg_win': sg_win,
-                            'wavelet': wavelet,
-                            'level': level,
-                            'alpha': alpha,
-                            'drop_levels': drop_levels
-                        })
+                # Calculate Aligned Metrics & HR
+                from metrics.doppler import calculate_doppler_metrics, extract_template_and_score
+                from metrics.ecg import calculate_hr
 
-                    st.session_state.doppler_params.update(params)
+                doppler_data_4hz = calculate_doppler_metrics(
+                    result['filtered'],
+                    result['current_peaks'],
+                    result['current_troughs'],
+                    sampling_rate
+                )
 
-                    # Execute pipeline
-                    result = doppler.process_doppler(signal, sampling_rate, st.session_state.doppler_params)
+                hr_from_doppler = calculate_hr(
+                    result['current_peaks'],
+                    sampling_rate,
+                    len(result['filtered']),
+                    rate_method=st.session_state.doppler_params.get('rate_method', 'monotone_cubic')
+                )
+                _, current_beat_scores = extract_template_and_score(
+                    result['filtered'],
+                    result['current_troughs']
+                )
+                noisy_windows, noisy_sample_mask = compute_doppler_noisy_windows(
+                    signal_length=len(result['filtered']),
+                    sampling_rate=sampling_rate,
+                    trough_indices=result['current_troughs'],
+                    beat_quality_scores=current_beat_scores,
+                    window_sec=10.0,
+                    step_sec=5.0,
+                    quality_threshold=0.8,
+                )
+                t_4hz = doppler_data_4hz.get('time_4hz', np.array([]))
+                noisy_mask_4hz = np.zeros(len(t_4hz), dtype=bool)
+                if len(t_4hz) > 0 and len(noisy_windows) > 0:
+                    for w_start, w_end in noisy_windows:
+                        noisy_mask_4hz |= (t_4hz >= w_start) & (t_4hz <= w_end)
 
-                    if result is None:
-                        st.error("Processing failed: insufficient peaks detected.")
+                # Zoom constraints
+                if 'doppler_region_start' not in st.session_state:
+                    st.session_state.doppler_region_start = 0.0
+                if 'doppler_region_end' not in st.session_state:
+                    st.session_state.doppler_region_end = min(10.0, float(time[-1]))
+                doppler_zoom = (st.session_state.doppler_region_start, st.session_state.doppler_region_end)
+
+                # Generate Plotly Chart
+                fig = create_rsp_bp_plot(
+                    time, result['raw'], result['filtered'],
+                    result['current_peaks'], result['current_troughs'],
+                    result['auto_peaks'], result['auto_troughs'],
+                    'DOPPLER',
+                    bp_data=doppler_data_4hz,
+                    hr_data=hr_from_doppler,
+                    beat_quality_scores=current_beat_scores,
+                    noisy_windows=noisy_windows,
+                    noisy_mask_4hz=noisy_mask_4hz,
+                    ui_revision='doppler_plot',
+                    zoom_range=doppler_zoom
+                )
+                add_task_event_lines(
+                    fig,
+                    st.session_state.task,
+                    float(time[-1]),
+                    st.session_state.get('session'),
+                    st.session_state.get('participant'),
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                noisy_pct = 100.0 * float(np.mean(noisy_sample_mask)) if len(noisy_sample_mask) > 0 else 0.0
+                st.caption(
+                    f"Noisy data (10 s window, 5 s step, quality < 0.8): "
+                    f"{noisy_pct:.1f}% of the recording"
+                )
+
+                # High-quality beat overlay (left) + threshold control (right)
+                beat_col, control_col = st.columns([3, 1])
+                with control_col:
+                    beat_quality_threshold = st.number_input(
+                        "Beat quality cutoff",
+                        min_value=0.0,
+                        max_value=1.0,
+                        value=0.95,
+                        step=0.01,
+                        key='doppler_beat_quality_cutoff',
+                        help="Show beats with template-match quality at or above this value."
+                    )
+                with beat_col:
+                    signal_duration_s = len(result['filtered']) / float(sampling_rate)
+                    overlay_groups = get_doppler_overlay_groups(
+                        st.session_state.get('task'),
+                        st.session_state.get('participant'),
+                        signal_duration_s,
+                    )
+                    if not overlay_groups:
+                        overlay_groups = [('High-Quality Beat Overlay', None)]
+
+                    fig_cols = st.columns(len(overlay_groups))
+                    for i, (group_title, group_intervals) in enumerate(overlay_groups):
+                        with fig_cols[i]:
+                            beat_fig, total_beats, kept_beats = create_doppler_beat_overlay_plot(
+                                result['filtered'],
+                                sampling_rate,
+                                result['current_troughs'],
+                                current_beat_scores,
+                                quality_threshold=beat_quality_threshold,
+                                target_len=200,
+                                include_intervals=group_intervals,
+                                title=group_title,
+                            )
+                            st.plotly_chart(beat_fig, use_container_width=False)
+                            st.caption(
+                                f"Accepted beats: {kept_beats}/{total_beats} "
+                                f"({(100.0 * kept_beats / total_beats):.1f}% )"
+                                if total_beats > 0 else "Accepted beats: 0/0"
+                            )
+
+                # --- 4. STATISTICS SECTION ---
+                st.subheader("Statistics")
+                
+                col1, col2, col3, col4, col5 = st.columns(5)
+                with col1:
+                    st.metric("Final Cycles", min(len(result['current_peaks']), len(result['current_troughs'])))
+                with col2:
+                    st.metric("Mean Peak", f"{doppler_data_4hz['mean_peak']:.3f}")
+                with col3:
+                    st.metric("Mean Trough", f"{doppler_data_4hz['mean_trough']:.3f}")
+                with col4:
+                    st.metric("Mean Amplitude", f"{doppler_data_4hz['mean_amp']:.3f}")
+                with col5:
+                    q_score = result.get('mean_quality', np.nan)
+                    if not np.isnan(q_score):
+                        # Streamlit delta styling: Green "Good" if score >= 0.8, Red "Review" if lower
+                        delta_color = "normal" if q_score >= 0.8 else "inverse"
+                        delta_str = "Good" if q_score >= 0.8 else "Review suggested"
+                        st.metric("Avg Beat Quality", f"{q_score:.2f}", delta=delta_str, delta_color=delta_color)
                     else:
-                        st.session_state.doppler_result = result
-                        st.success("Doppler processed successfully.")
-
-                # --- 3. DISPLAY RESULTS ---
-                if st.session_state.doppler_result is not None:
-                    result = st.session_state.doppler_result
-
-                    st.subheader("Manual Doppler Editing")
-
-                    # Peak/Trough Editing Stats
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("Auto Peaks", len(result['auto_peaks']))
-                    with col2:
-                        st.metric("Auto Troughs", len(result['auto_troughs']))
-                    with col3:
-                        n_added_peaks = len(np.setdiff1d(result['current_peaks'], result['auto_peaks']))
-                        st.metric("Added Peaks", n_added_peaks)
-                    with col4:
-                        n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
-                        st.metric("Added Troughs", n_added_troughs)
-
-                    # Time Array
-                    time = np.arange(len(result['filtered'])) / sampling_rate
-
-                    # Calculate Aligned Metrics & HR
-                    from metrics.doppler import calculate_doppler_metrics
-                    from metrics.ecg import calculate_hr
-
-                    doppler_data_4hz = calculate_doppler_metrics(
-                        result['filtered'],
-                        result['current_peaks'],
-                        result['current_troughs'],
-                        sampling_rate
-                    )
-
-                    hr_from_doppler = calculate_hr(
-                        result['current_peaks'],
-                        sampling_rate,
-                        len(result['filtered']),
-                        rate_method=st.session_state.doppler_params.get('rate_method', 'monotone_cubic')
-                    )
-
-                    # Zoom constraints
-                    if 'doppler_region_start' not in st.session_state:
-                        st.session_state.doppler_region_start = 0.0
-                    if 'doppler_region_end' not in st.session_state:
-                        st.session_state.doppler_region_end = min(10.0, float(time[-1]))
-                    doppler_zoom = (st.session_state.doppler_region_start, st.session_state.doppler_region_end)
-
-                    # Generate Plotly Chart
-                    fig = create_rsp_bp_plot(
-                        time, result['raw'], result['filtered'],
-                        result['current_peaks'], result['current_troughs'],
-                        result['auto_peaks'], result['auto_troughs'],
-                        'DOPPLER',
-                        bp_data=doppler_data_4hz,
-                        hr_data=hr_from_doppler,
-                        ui_revision='doppler_plot',
-                        zoom_range=doppler_zoom
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-
-                    # --- 4. STATISTICS SECTION ---
-                    st.subheader("Statistics")
-                    
-                    col1, col2, col3, col4, col5 = st.columns(5)
-                    with col1:
-                        st.metric("Final Cycles", min(len(result['current_peaks']), len(result['current_troughs'])))
-                    with col2:
-                        st.metric("Mean Peak", f"{doppler_data_4hz['mean_peak']:.3f}")
-                    with col3:
-                        st.metric("Mean Trough", f"{doppler_data_4hz['mean_trough']:.3f}")
-                    with col4:
-                        st.metric("Mean Amplitude", f"{doppler_data_4hz['mean_amp']:.3f}")
-                    with col5:
-                        q_score = result.get('mean_quality', np.nan)
-                        if not np.isnan(q_score):
-                            # Streamlit delta styling: Green "Good" if score >= 0.8, Red "Review" if lower
-                            delta_color = "normal" if q_score >= 0.8 else "inverse"
-                            delta_str = "Good" if q_score >= 0.8 else "Review suggested"
-                            st.metric("Avg Beat Quality", f"{q_score:.2f}", delta=delta_str, delta_color=delta_color)
-                        else:
-                            st.metric("Avg Beat Quality", "N/A")
+                        st.metric("Avg Beat Quality", "N/A")
 
         tab_idx += 1
 

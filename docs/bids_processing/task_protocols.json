@@ -6,7 +6,8 @@
       "breath": "Breathing protocol",
       "gas": "Gas challenge protocol",
       "rest": "Resting state protocol",
-      "sts": "Sit-to-stand protocol"
+      "sts": "Sit-to-stand protocol",
+      "coldpress": "Cold pressor protocol"
     }
   },
   "protocol_variant": {
@@ -14,7 +15,7 @@
     "Levels": {
       "default": "Default repository protocol",
       "sub-00_override": "Participant-specific override for sub-00*",
-      "session_a": "Session-A STS protocol"
+      "session_a": "Session-A protocol"
     }
   },
   "participant_scope": {

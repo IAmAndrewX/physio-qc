@@ -36,6 +36,40 @@ PMU_PREFER_SCANNER_SIGNALS = True
 # Fallback Biopac channel for spirometer waveform (1-based index)
 SPIROMETER_CHANNEL_INDEX = 12
 
+# Phenotype/metadata CSVs used for participant demographics and experiment notes
+PHENOTYPE_BASE_PATH = '/export02/projects/LCS_Management/05_phenotype/redcap_exports'
+PHENOTYPE_REDCAP_PATH = f'{PHENOTYPE_BASE_PATH}/InvestigationOfTheLo_DATA_2026-02-10_1414.csv'
+PHENOTYPE_REDCAP_DEFINITIONS_PATH = f'{PHENOTYPE_BASE_PATH}/REDCap_variables_definitions.xlsx'
+PHENOTYPE_GROUP_INFO_CC_PATH = f'{PHENOTYPE_BASE_PATH}/Group_InfoSession_Data(CC).csv'
+PHENOTYPE_GROUP_INFO_LC_PATH = f'{PHENOTYPE_BASE_PATH}/Group_InfoSession_Data(LC).csv'
+PHENOTYPE_TESTING_SCHEDULE_PATH = f'{PHENOTYPE_BASE_PATH}/Testing_Schedule(Sheet1).csv'
+PHENOTYPE_NOTES_SESSION_A_PATH = f'{PHENOTYPE_BASE_PATH}/LC_Experiments_Notes_v2(Session A (Physio)).csv'
+PHENOTYPE_NOTES_SESSION_B_PATH = f'{PHENOTYPE_BASE_PATH}/LC_Experiments_Notes_v2(Session B (MRI)).csv'
+
+# Metadata view defaults
+CORE_QUESTIONNAIRE_FIELDS = ['sc_tot_score', 'phq9_total_score', 'vafs']
+CORE_NEUROPSYCH_FIELDS = [
+    'DigitSpan_Forward',
+    'DigitSpan_Backward',
+    'RAVLT_DelayedRecall',
+    'Category_Fluency_Category1_Total',
+    'Category_Fluency_Category2_Total',
+]
+
+# ECG setup labels shown in metadata
+ECG_CONFIG_CUTOFF_DATE = '2025-10-31'
+ECG_CONFIG_OLD_LABEL = 'Old'
+ECG_CONFIG_NEW_LABEL = 'New'
+
+# Valsalva setup changeover (inclusive old cutoff)
+VALSALVA_OLD_SETUP_CUTOFF_DATE = '2025-10-02'
+VALSALVA_OLD_SETUP_NOTE = (
+    'Old/wrong valsalva setup (closed-glottis test) was used through 2025-10-02.'
+)
+VALSALVA_NEW_SETUP_NOTE = (
+    'Valsalva setup was corrected starting 2025-10-03.'
+)
+
 # =============================================================================
 # DATA PARAMETERS
 # =============================================================================
@@ -426,6 +460,20 @@ TASK_EVENTS = {
         (0,   'Supine', '#54A0FF'),
         (300, 'Stand',  '#FF6B6B'),
     ],
+    # Cold pressor (Session A): 5 cycles of 90s rest + 60s cold immersion
+    'coldpress': [
+        (0,   'Rest 1',       '#888888'),
+        (90,  'Cold Press 1', '#60A5FA'),
+        (150, 'Rest 2',       '#888888'),
+        (240, 'Cold Press 2', '#60A5FA'),
+        (300, 'Rest 3',       '#888888'),
+        (390, 'Cold Press 3', '#60A5FA'),
+        (450, 'Rest 4',       '#888888'),
+        (540, 'Cold Press 4', '#60A5FA'),
+        (600, 'Rest 5',       '#888888'),
+        (690, 'Cold Press 5', '#60A5FA'),
+        (750, 'Cold Off',     '#F8F9FA'),
+    ],
 }
 
 # Participant-specific task protocol overrides.
@@ -464,6 +512,9 @@ TASK_EVENT_ALIASES = {
     'sts':          'sts',
     'sittostand':   'sts',
     'stand':        'sts',
+    'valsalva':     'valsalva',
+    'coldpress':    'coldpress',
+    'coldpressor':  'coldpress',
 }
 
 # =============================================================================

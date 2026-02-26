@@ -14,7 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import config  # noqa: E402
-from utils.pmu_integration import DEFAULT_SCANNER_DIR_VARIANTS  # noqa: E402
+from utils.pmu_integration import DEFAULT_SCANNER_DIR_VARIANTS, find_scanner_folder_in_session  # noqa: E402
 
 PHYSIO_DIR = Path(config.BASE_DATA_PATH)
 PHYSIO_SESSION = config.PMU_PHYSIO_SESSION
@@ -85,11 +85,7 @@ def get_n_volume_markers(ext_file: Path, verbose: bool = False):
 
 def find_scanner_dir(subject_dir: Path, session: str, variants: list[str]):
     """Return first scanner directory match for a participant/session."""
-    for variant in variants:
-        candidate = subject_dir / session / variant
-        if candidate.exists() and candidate.is_dir():
-            return candidate
-    return None
+    return find_scanner_folder_in_session(subject_dir / session, folder_variants=tuple(variants))
 
 
 def parse_args():

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import html
 
 import streamlit.components.v1 as components
 
@@ -22,7 +23,7 @@ from neuro.niivue_component import build_niivue_html, colormap_css
 from neuro.file_server import register_file, clear_cache as clear_nifti_cache
 from neuro.masking import create_masked_volume
 from metrics import ecg, rsp, ppg, blood_pressure, etco2, eto2, spo2, doppler
-from utils import peak_editing, export
+from utils import peak_editing, export, subject_metadata
 
 
 @st.cache_data(show_spinner="Scanning data directory...")
@@ -79,6 +80,9 @@ def init_session_state():
 
     if 'loaded_data' not in st.session_state:
         st.session_state.loaded_data = None
+
+    if 'subject_metadata' not in st.session_state:
+        st.session_state.subject_metadata = None
 
     if 'ecg_result' not in st.session_state:
         st.session_state.ecg_result = None
@@ -548,7 +552,7 @@ def add_task_event_lines(fig, task_name, max_time, session_label=None, participa
     task_key = _resolve_task_key(task_name)
     if task_key is None:
         return fig
-    if task_key == 'sts' and session_label is not None:
+    if task_key in {'sts', 'coldpress'} and session_label is not None:
         session_a_aliases = {str(alias).strip().lower() for alias in config.SPIROMETRY_SESSION_A_ALIASES}
         if str(session_label).strip().lower() not in session_a_aliases:
             return fig
@@ -639,6 +643,154 @@ def add_task_event_lines(fig, task_name, max_time, session_label=None, participa
     return fig
 
 
+def _render_note_block(text):
+    """Render multiline notes without clipping long paragraphs."""
+    safe_text = html.escape(str(text))
+    st.markdown(
+        f"<div style='white-space: pre-wrap; line-height: 1.4; margin-bottom: 0.6rem;'>{safe_text}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_experiment_notes_panel(task_name, metadata):
+    """Render overall/session/task notes for the currently loaded task."""
+    if not metadata:
+        return
+    notes = metadata.get('experiment_notes', {})
+    task_notes = notes.get('task_notes', {}) if isinstance(notes, dict) else {}
+    task_key = _resolve_task_key(task_name) or subject_metadata.normalize_task_key(task_name)
+    overall = notes.get('overall_notes')
+    session_note = notes.get('session_notes')
+    current_task_note = task_notes.get(task_key) if isinstance(task_notes, dict) else None
+    if not (overall or session_note or current_task_note):
+        return
+
+    with st.expander("Experiment Notes", expanded=False):
+        if overall:
+            st.markdown("**Overall Notes**")
+            _render_note_block(overall)
+        if current_task_note:
+            st.markdown("**Task Notes**")
+            _render_note_block(current_task_note)
+        if session_note:
+            st.markdown("**Session Notes**")
+            _render_note_block(session_note)
+
+
+def render_subject_metadata_tab(metadata):
+    """Render participant-level metadata and questionnaire/neuropsych summaries."""
+    st.header("Participant Metadata")
+    if not metadata:
+        st.info("No participant metadata found for this recording.")
+        return
+
+    sex_raw = metadata.get('sex_asab')
+    sex_label = metadata.get('sex_asab_label')
+    if sex_label and sex_raw is not None:
+        sex_display = f"{sex_label} ({sex_raw})"
+    else:
+        sex_display = sex_label or sex_raw or 'N/A'
+
+    gender_raw = metadata.get('gender')
+    gender_label = metadata.get('gender_label')
+    if gender_label and gender_raw is not None:
+        gender_display = f"{gender_label} ({gender_raw})"
+    else:
+        gender_display = gender_label or gender_raw or 'N/A'
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.markdown(f"**Recording Date**: {metadata.get('recording_date') or 'N/A'}")
+    with col2:
+        st.markdown(f"**ASAB Sex**: {sex_display}")
+    with col3:
+        st.markdown(f"**Age**: {metadata.get('age') if metadata.get('age') is not None else 'N/A'}")
+    with col4:
+        st.markdown(f"**ECG Configuration**: {metadata.get('ecg_configuration') or 'N/A'}")
+
+    researchers = metadata.get('researchers') or []
+    st.markdown(f"**Researchers**: {', '.join(researchers) if researchers else 'N/A'}")
+    st.markdown(f"**Gender Identity**: {gender_display}")
+
+    neuro = metadata.get('neuropsych', {}) if isinstance(metadata.get('neuropsych'), dict) else {}
+    with st.expander("Neuropsych Summary", expanded=False):
+        st.markdown(f"**NP Date**: {neuro.get('NP_Date') or 'N/A'}")
+        st.markdown(f"**MoCA Total**: {neuro.get('MoCA_Total') if neuro.get('MoCA_Total') is not None else 'N/A'}")
+
+        moca_subscores = neuro.get('MoCA_Subscores', {}) if isinstance(neuro.get('MoCA_Subscores'), dict) else {}
+        if moca_subscores:
+            st.markdown("**MoCA Subscores**")
+            for key in sorted(moca_subscores):
+                st.markdown(f"- `{key}`: {moca_subscores[key]}")
+
+        core_tests = neuro.get('CoreTests', {}) if isinstance(neuro.get('CoreTests'), dict) else {}
+        if core_tests:
+            st.markdown("**Core Tests**")
+            for key in sorted(core_tests):
+                st.markdown(f"- `{key}`: {core_tests[key]}")
+
+    questionnaires = metadata.get('questionnaires', {}) if isinstance(metadata.get('questionnaires'), dict) else {}
+    questionnaires_interpreted = (
+        metadata.get('questionnaires_interpreted', {})
+        if isinstance(metadata.get('questionnaires_interpreted'), dict)
+        else {}
+    )
+    with st.expander("Core Questionnaires", expanded=False):
+        if questionnaires:
+            for key in sorted(questionnaires):
+                value = questionnaires.get(key)
+                interpreted = questionnaires_interpreted.get(key, {})
+                interpreted_value = interpreted.get('interpreted_value') if isinstance(interpreted, dict) else None
+                scale_anchors = interpreted.get('scale_anchors') if isinstance(interpreted, dict) else None
+
+                suffix_parts = []
+                if interpreted_value:
+                    suffix_parts.append(f"interpreted: {interpreted_value}")
+                if scale_anchors:
+                    suffix_parts.append(f"scale: {scale_anchors}")
+
+                suffix = f" ({'; '.join(suffix_parts)})" if suffix_parts else ""
+                st.markdown(f"- `{key}`: {value if value is not None else 'N/A'}{suffix}")
+        else:
+            st.markdown("No questionnaire totals available.")
+
+    notes = metadata.get('experiment_notes', {}) if isinstance(metadata.get('experiment_notes'), dict) else {}
+    with st.expander("Notes", expanded=True):
+        overall = notes.get('overall_notes')
+        if overall:
+            st.markdown("**Overall Notes**")
+            _render_note_block(overall)
+
+        setup_notes = notes.get('setup_notes')
+        if setup_notes:
+            st.markdown("**Setup Notes**")
+            _render_note_block(setup_notes)
+
+        schedule_notes = notes.get('schedule_notes')
+        if schedule_notes:
+            st.markdown("**Schedule Notes**")
+            _render_note_block(schedule_notes)
+
+        mri_notes = notes.get('mri_notes')
+        if mri_notes:
+            st.markdown("**MRI Notes**")
+            _render_note_block(mri_notes)
+
+        task_notes = notes.get('task_notes', {}) if isinstance(notes.get('task_notes'), dict) else {}
+        if task_notes:
+            st.markdown("**Task Notes**")
+            for task_key in sorted(task_notes):
+                st.markdown(f"`{task_key}`")
+                _render_note_block(task_notes[task_key])
+
+        additional_notes = notes.get('additional_session_notes') or []
+        if additional_notes:
+            st.markdown("**Additional Session Notes**")
+            for idx, extra in enumerate(additional_notes, start=1):
+                st.markdown(f"Additional note {idx}")
+                _render_note_block(extra)
+
+
 def is_session_a_selected(session_label):
     """Return True when current session should show the external spirometry placeholder."""
     aliases = {str(alias).strip().lower() for alias in config.SPIROMETRY_SESSION_A_ALIASES}
@@ -651,6 +803,7 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
     result_state_key = f"{state_prefix}_result"
 
     st.header(header_title)
+    render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
     is_rsp = signal_key == 'rsp'
     if is_rsp:
@@ -1537,6 +1690,16 @@ def main():
             st.session_state.eto2_result = None
             st.session_state.spo2_result = None
             st.session_state.spirometer_result = None
+            st.session_state.subject_metadata = None
+
+            try:
+                st.session_state.subject_metadata = subject_metadata.build_subject_metadata(
+                    participant=participant,
+                    session=session,
+                    task=task,
+                )
+            except Exception as exc:
+                st.warning(f"Metadata load failed: {exc}")
 
             # Clear stale zoom/region states so they reinitialise for new data
             for key in list(st.session_state.keys()):
@@ -1559,9 +1722,11 @@ def main():
                 if pmu_status.get('success'):
                     scan_idx = pmu_status.get('scan_index')
                     strategy = pmu_status.get('match_strategy', 'unknown')
+                    folder = pmu_status.get('resolved_pmu_folder')
+                    folder_msg = f", folder: {folder}" if folder else ""
                     st.success(
                         f"PMU Session B enrichment active: scan #{scan_idx} "
-                        f"(match: {strategy})"
+                        f"(match: {strategy}{folder_msg})"
                     )
                 else:
                     st.warning(f"PMU enrichment not applied: {pmu_status.get('message', 'unknown reason')}")
@@ -1574,8 +1739,17 @@ def main():
     sampling_rate = data['sampling_rate']
     detected_signals = list(data['signal_mappings'].keys())
     session_a_selected = is_session_a_selected(st.session_state.session)
+    if st.session_state.get('subject_metadata') is None:
+        try:
+            st.session_state.subject_metadata = subject_metadata.build_subject_metadata(
+                participant=st.session_state.participant,
+                session=st.session_state.session,
+                task=st.session_state.task,
+            )
+        except Exception:
+            st.session_state.subject_metadata = None
 
-    tabs = []
+    tabs = ["Metadata"]
     if 'ecg' in detected_signals:
         tabs.append("ECG")
     if 'rsp' in detected_signals:
@@ -1601,9 +1775,14 @@ def main():
     tab_objects = st.tabs(tabs)
     tab_idx = 0
 
+    with tab_objects[tab_idx]:
+        render_subject_metadata_tab(st.session_state.get('subject_metadata'))
+    tab_idx += 1
+
     if 'ecg' in detected_signals:
         with tab_objects[tab_idx]:
             st.header("ECG Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
             col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -1977,6 +2156,7 @@ def main():
     if 'ppg' in detected_signals:
         with tab_objects[tab_idx]:
             st.header("PPG Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
             col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -2233,6 +2413,7 @@ def main():
     if 'bp' in detected_signals:
         with tab_objects[tab_idx]:
             st.header("Blood Pressure Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
             col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -2379,6 +2560,7 @@ def main():
     if 'etco2' in detected_signals:
         with tab_objects[tab_idx]:
             st.header("End-Tidal CO2 (ETCO2) Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
     
             col1, col2, col3 = st.columns([2, 1, 1])
     
@@ -2708,6 +2890,7 @@ def main():
     if 'eto2' in detected_signals:
         with tab_objects[tab_idx]:
             st.header("End-Tidal O2 (ETO2) Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
     
             col1, col2, col3 = st.columns([2, 1, 1])
     
@@ -3034,6 +3217,7 @@ def main():
     if 'spo2' in detected_signals:
         with tab_objects[tab_idx]:
             st.header("SpO2 (Oxygen Saturation) Processing")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
             col1, col2, col3 = st.columns([2, 1, 1])
 
@@ -3360,8 +3544,9 @@ def main():
 
 
     if 'doppler' in detected_signals:
-            with tab_objects[tab_idx]:
+        with tab_objects[tab_idx]:
                 st.header("Doppler Processing")
+                render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
                 # --- 1. UI FOR FILTER PARAMS ---
                 col1, col2, col3 = st.columns(3)
@@ -3501,7 +3686,7 @@ def main():
                         else:
                             st.metric("Avg Beat Quality", "N/A")
 
-            tab_idx += 1
+        tab_idx += 1
 
 
 
@@ -3512,6 +3697,7 @@ def main():
     if session_a_selected:
         with tab_objects[tab_idx]:
             st.header("Spirometry (Session A)")
+            render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
             st.warning("External spirometry export is currently disabled (vendor data issue).")
             st.info(
                 "This tab is a placeholder for the external spirometry report. "
@@ -3569,7 +3755,12 @@ def main():
 
                 # Create files
                 df = export.create_combined_dataframe(results_dict, sampling_rate)
-                metadata = export.create_metadata_json(results_dict, params_dict, sampling_rate)
+                metadata = export.create_metadata_json(
+                    results_dict,
+                    params_dict,
+                    sampling_rate,
+                    subject_metadata=st.session_state.get('subject_metadata'),
+                )
                 paths = export.export_physio_data(output_path, st.session_state.participant, st.session_state.session, st.session_state.task, df, metadata)
 
                 st.success("Export complete!")

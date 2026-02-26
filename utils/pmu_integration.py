@@ -4,12 +4,12 @@ PMU integration helpers for injecting Siemens scanner respiration/pulse into app
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
-
 
 DEFAULT_SCANNER_DIR_VARIANTS = (
     "Scanner_physio",
@@ -17,6 +17,7 @@ DEFAULT_SCANNER_DIR_VARIANTS = (
     "scanner_physio",
     "scanner_Physio",
 )
+_CANONICAL_SCANNER_FOLDER_TOKEN = "scannerphysio"
 
 
 def _normalize_task_name(task_name: str) -> str:
@@ -53,6 +54,48 @@ def session_matches_alias(session_label: str, aliases: list[str]) -> bool:
     normalized = _normalize_session_token(session_label)
     normalized_aliases = {_normalize_session_token(alias) for alias in aliases}
     return normalized in normalized_aliases
+
+
+def _normalize_scanner_folder_token(folder_name: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(folder_name).strip().lower())
+
+
+def _is_scanner_folder_name(folder_name: str, folder_variants: tuple[str, ...]) -> bool:
+    normalized = _normalize_scanner_folder_token(folder_name)
+    if normalized == _CANONICAL_SCANNER_FOLDER_TOKEN:
+        return True
+    normalized_variants = {_normalize_scanner_folder_token(name) for name in folder_variants}
+    return normalized in normalized_variants
+
+
+def _find_scanner_folder_in_session(
+    session_dir: Path,
+    folder_variants: tuple[str, ...] = DEFAULT_SCANNER_DIR_VARIANTS,
+) -> Path | None:
+    if not session_dir.exists() or not session_dir.is_dir():
+        return None
+
+    child_dirs = [child for child in sorted(session_dir.iterdir()) if child.is_dir()]
+
+    # Fast path: explicit variant names first (exact directory-name matches).
+    for variant in folder_variants:
+        for child in child_dirs:
+            if child.name == variant:
+                return child
+
+    # Flexible fallback: case-insensitive + separator-insensitive token matching.
+    for child in child_dirs:
+        if child.is_dir() and _is_scanner_folder_name(child.name, folder_variants):
+            return child
+    return None
+
+
+def find_scanner_folder_in_session(
+    session_dir: Path,
+    folder_variants: tuple[str, ...] = DEFAULT_SCANNER_DIR_VARIANTS,
+) -> Path | None:
+    """Public helper: resolve scanner PMU folder with flexible name matching."""
+    return _find_scanner_folder_in_session(session_dir, folder_variants=folder_variants)
 
 
 def _parse_tokens(filepath: Path) -> list[int]:
@@ -270,13 +313,13 @@ def _find_scanner_physio_dir(
     participant: str,
     pmu_sessions: list[str],
     folder_variants: tuple[str, ...] = DEFAULT_SCANNER_DIR_VARIANTS,
-) -> tuple[Path | None, str | None]:
+) -> tuple[Path | None, str | None, str | None]:
     for pmu_session in pmu_sessions:
-        for variant in folder_variants:
-            candidate = base_physio_path / participant / pmu_session / variant
-            if candidate.exists():
-                return candidate, pmu_session
-    return None, None
+        session_dir = base_physio_path / participant / pmu_session
+        matched = _find_scanner_folder_in_session(session_dir, folder_variants=folder_variants)
+        if matched is not None:
+            return matched, pmu_session, matched.name
+    return None, None, None
 
 
 def _find_available_scanner_sessions(
@@ -293,10 +336,8 @@ def _find_available_scanner_sessions(
     for ses_dir in sorted(participant_root.glob("ses-*")):
         if not ses_dir.is_dir():
             continue
-        for variant in folder_variants:
-            if (ses_dir / variant).exists():
-                available_sessions.append(ses_dir.name)
-                break
+        if _find_scanner_folder_in_session(ses_dir, folder_variants=folder_variants) is not None:
+            available_sessions.append(ses_dir.name)
     return available_sessions
 
 
@@ -325,7 +366,11 @@ def extract_pmu_task_signals(
     pmu_sessions.append(infer_pmu_session_label(session))
     pmu_sessions = list(dict.fromkeys(pmu_sessions))
 
-    physio_dir, resolved_pmu_session = _find_scanner_physio_dir(base_physio_path, participant_label, pmu_sessions)
+    physio_dir, resolved_pmu_session, resolved_pmu_folder = _find_scanner_physio_dir(
+        base_physio_path,
+        participant_label,
+        pmu_sessions,
+    )
     if physio_dir is None:
         available_sessions = _find_available_scanner_sessions(base_physio_path, participant_label)
         if available_sessions:
@@ -432,6 +477,7 @@ def extract_pmu_task_signals(
         "scan_start_time_sec": float(matched_scan["start_time"]),
         "scan_duration_sec": float(matched_scan["duration"]),
         "resolved_pmu_session": resolved_pmu_session,
+        "resolved_pmu_folder": resolved_pmu_folder,
         "resolved_bids_session": resolved_bids_session,
     }
 

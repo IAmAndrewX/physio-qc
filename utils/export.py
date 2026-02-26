@@ -7,6 +7,7 @@ Pure functions with no classes
 import json
 from datetime import datetime
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
 
@@ -120,7 +121,7 @@ def create_combined_dataframe(results_dict, sampling_rate):
     return df
 
 
-def create_metadata_json(results_dict, params_dict, sampling_rate):
+def create_metadata_json(results_dict, params_dict, sampling_rate, subject_metadata=None):
     """
     Create BIDS-inspired JSON metadata
 
@@ -132,6 +133,8 @@ def create_metadata_json(results_dict, params_dict, sampling_rate):
         Dictionary with processing parameters used
     sampling_rate : int
         Sampling rate in Hz
+    subject_metadata : dict, optional
+        Participant/session/task metadata and notes payload.
 
     Returns
     -------
@@ -298,6 +301,9 @@ def create_metadata_json(results_dict, params_dict, sampling_rate):
         "QCOperator": "automatic",
         "TotalManualEdits": int(total_edits)
     }
+
+    if isinstance(subject_metadata, dict) and subject_metadata:
+        metadata['SubjectMetadata'] = subject_metadata
 
     return metadata
 

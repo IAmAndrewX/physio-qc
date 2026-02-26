@@ -29,7 +29,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 import config  # noqa: E402
-from utils.pmu_integration import DEFAULT_SCANNER_DIR_VARIANTS  # noqa: E402
+from utils.pmu_integration import DEFAULT_SCANNER_DIR_VARIANTS, find_scanner_folder_in_session  # noqa: E402
 
 # ============================================================================
 # CONFIGURATION
@@ -451,11 +451,9 @@ def find_physio_dir(subject_id, physio_session=None):
         physio_session = PHYSIO_SESSION
     base_dir = PHYSIO_DIR / f"sub-{subject_id}" / physio_session
 
-    # Check all case variants
-    for variant in DEFAULT_SCANNER_DIR_VARIANTS:
-        path = base_dir / variant
-        if path.exists():
-            return path
+    matched = find_scanner_folder_in_session(base_dir, folder_variants=tuple(DEFAULT_SCANNER_DIR_VARIANTS))
+    if matched is not None:
+        return matched
 
     # If nothing found, raise error with helpful message
     raise FileNotFoundError(

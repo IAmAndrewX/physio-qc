@@ -5,11 +5,12 @@ Pure functions with no classes
 
 import re
 from pathlib import Path
-import pandas as pd
+
 import bioread
+import pandas as pd
 
 import config
-from utils.conversions import convert_gas_channels, convert_doppler_channel
+from utils.conversions import convert_doppler_channel, convert_gas_channels
 from utils.pmu_integration import (
     extract_pmu_task_signals,
     resample_signal_to_length,
@@ -180,6 +181,7 @@ def _attach_pmu_session_b_signals(df_raw, signal_mappings, participant, session,
         'scan_index': pmu_result.get('scan_index'),
         'scan_duration_sec': pmu_result.get('scan_duration_sec'),
         'resolved_pmu_session': pmu_result.get('resolved_pmu_session'),
+        'resolved_pmu_folder': pmu_result.get('resolved_pmu_folder'),
         'resolved_bids_session': pmu_result.get('resolved_bids_session'),
         'rsp_column': rsp_column,
         'ppg_column': ppg_column,

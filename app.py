@@ -653,16 +653,15 @@ def _render_note_block(text):
 
 
 def render_experiment_notes_panel(task_name, metadata):
-    """Render overall/session/task notes for the currently loaded task."""
+    """Render overall + task notes for the currently loaded task."""
     if not metadata:
         return
     notes = metadata.get('experiment_notes', {})
     task_notes = notes.get('task_notes', {}) if isinstance(notes, dict) else {}
     task_key = _resolve_task_key(task_name) or subject_metadata.normalize_task_key(task_name)
     overall = notes.get('overall_notes')
-    session_note = notes.get('session_notes')
     current_task_note = task_notes.get(task_key) if isinstance(task_notes, dict) else None
-    if not (overall or session_note or current_task_note):
+    if not (overall or current_task_note):
         return
 
     with st.expander("Experiment Notes", expanded=False):
@@ -672,9 +671,6 @@ def render_experiment_notes_panel(task_name, metadata):
         if current_task_note:
             st.markdown("**Task Notes**")
             _render_note_block(current_task_note)
-        if session_note:
-            st.markdown("**Session Notes**")
-            _render_note_block(session_note)
 
 
 def render_subject_metadata_tab(metadata):
@@ -698,19 +694,42 @@ def render_subject_metadata_tab(metadata):
     else:
         gender_display = gender_label or gender_raw or 'N/A'
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown(f"**Recording Date**: {metadata.get('recording_date') or 'N/A'}")
-    with col2:
-        st.markdown(f"**ASAB Sex**: {sex_display}")
-    with col3:
-        st.markdown(f"**Age**: {metadata.get('age') if metadata.get('age') is not None else 'N/A'}")
-    with col4:
-        st.markdown(f"**ECG Configuration**: {metadata.get('ecg_configuration') or 'N/A'}")
+    bmi_value = metadata.get('bmi')
+    if isinstance(bmi_value, float):
+        bmi_display = f"{bmi_value:.1f}"
+    elif bmi_value is None or bmi_value == '':
+        bmi_display = 'N/A'
+    else:
+        bmi_display = str(bmi_value)
+
+    summary_fields = [
+        ("Recording Date", metadata.get('recording_date') or 'N/A'),
+        ("Sex", sex_display),
+        ("Gender", gender_display),
+        ("Age", metadata.get('age') if metadata.get('age') is not None else 'N/A'),
+        ("BMI", bmi_display),
+        ("ECG Configuration", metadata.get('ecg_configuration') or 'N/A'),
+    ]
+    summary_html = "".join(
+        (
+            "<div style='padding:0.35rem 0.45rem;'>"
+            f"<div style='font-weight:700; opacity:0.95; margin-bottom:0.05rem;'>{html.escape(str(label))}</div>"
+            f"<div style='white-space:nowrap; overflow:hidden; text-overflow:ellipsis;'>{html.escape(str(value))}</div>"
+            "</div>"
+        )
+        for label, value in summary_fields
+    )
+    st.markdown(
+        (
+            "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); "
+            "gap:0.35rem 0.75rem; margin-bottom:0.35rem;'>"
+            f"{summary_html}</div>"
+        ),
+        unsafe_allow_html=True,
+    )
 
     researchers = metadata.get('researchers') or []
     st.markdown(f"**Researchers**: {', '.join(researchers) if researchers else 'N/A'}")
-    st.markdown(f"**Gender Identity**: {gender_display}")
 
     neuro = metadata.get('neuropsych', {}) if isinstance(metadata.get('neuropsych'), dict) else {}
     with st.expander("Neuropsych Summary", expanded=False):

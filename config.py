@@ -463,16 +463,17 @@ TASK_EVENTS = {
     # Cold pressor (Session A): 5 cycles of 90s rest + 60s cold immersion
     'coldpress': [
         (0,   'Rest 1',       '#888888'),
-        (90,  'Cold Press 1', '#60A5FA'),
+        (90,  'Cold 1',       '#60A5FA'),
         (150, 'Rest 2',       '#888888'),
-        (240, 'Cold Press 2', '#60A5FA'),
+        (240, 'Cold 2',       '#60A5FA'),
         (300, 'Rest 3',       '#888888'),
-        (390, 'Cold Press 3', '#60A5FA'),
+        (390, 'Cold 3',       '#60A5FA'),
         (450, 'Rest 4',       '#888888'),
-        (540, 'Cold Press 4', '#60A5FA'),
+        (540, 'Cold 4',       '#60A5FA'),
         (600, 'Rest 5',       '#888888'),
-        (690, 'Cold Press 5', '#60A5FA'),
-        (750, 'Cold Off',     '#F8F9FA'),
+        (690, 'Cold 5',       '#60A5FA'),
+        (750, 'Rest 6',       '#888888'),
+        (840, 'Off',          '#F8F9FA'),
     ],
 }
 

@@ -28,13 +28,14 @@ rest	default	all	0	480	Rest	n/a	n/a	config + protocol note
 sts	session_a	session in SPIROMETRY_SESSION_A_ALIASES	0	300	Supine	n/a	n/a	config.TASK_EVENTS
 sts	session_a	session in SPIROMETRY_SESSION_A_ALIASES	300	n/a	Stand	n/a	n/a	config.TASK_EVENTS
 coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	0	90	Rest 1	n/a	n/a	config.TASK_EVENTS
-coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	90	60	Cold Press 1	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	90	60	Cold 1	n/a	n/a	config.TASK_EVENTS
 coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	150	90	Rest 2	n/a	n/a	config.TASK_EVENTS
-coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	240	60	Cold Press 2	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	240	60	Cold 2	n/a	n/a	config.TASK_EVENTS
 coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	300	90	Rest 3	n/a	n/a	config.TASK_EVENTS
-coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	390	60	Cold Press 3	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	390	60	Cold 3	n/a	n/a	config.TASK_EVENTS
 coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	450	90	Rest 4	n/a	n/a	config.TASK_EVENTS
-coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	540	60	Cold Press 4	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	540	60	Cold 4	n/a	n/a	config.TASK_EVENTS
 coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	600	90	Rest 5	n/a	n/a	config.TASK_EVENTS
-coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	690	60	Cold Press 5	n/a	n/a	config.TASK_EVENTS
-coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	750	0	Cold Off	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	690	60	Cold 5	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	750	90	Rest 6	n/a	n/a	config.TASK_EVENTS
+coldpress	session_a	session in SPIROMETRY_SESSION_A_ALIASES	840	0	Off	n/a	n/a	config.TASK_EVENTS

@@ -396,7 +396,7 @@ def _coerce_scalar(value: Any) -> Any:
     if not text:
         return None
     lower = text.lower()
-    if lower in {"na", "n/a", "nan", "null"}:
+    if lower in {"na", "n/a", "nan", "null", "#value!", "#n/a", "value!"}:
         return None
     if re.fullmatch(r"[-+]?\d+", text):
         try:
@@ -409,6 +409,66 @@ def _coerce_scalar(value: Any) -> Any:
         except Exception:
             return text
     return text
+
+
+def _normalized_var_token(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        try:
+            return float(value)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.lower() in {"na", "n/a", "nan", "null", "#value!", "#n/a"}:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _sanitize_bmi_value(value: Any) -> float | None:
+    parsed = _safe_float(value)
+    if parsed is None:
+        return None
+    if parsed < 10 or parsed > 90:
+        return None
+    return round(parsed, 2)
+
+
+def _resolve_bmi_from_group_entry(entry: dict[str, Any] | None) -> Any:
+    if not entry:
+        return None
+
+    # Primary: explicit BMI row in group info table.
+    for key, value in entry.items():
+        if _normalized_var_token(key) == "bmi":
+            bmi_value = _sanitize_bmi_value(value)
+            if bmi_value is not None:
+                return bmi_value
+
+    # Secondary: derive BMI from weight/height if available in group info.
+    height_m = None
+    weight_kg = None
+    for key, value in entry.items():
+        token = _normalized_var_token(key)
+        if token in {"heightm", "height"}:
+            height_m = _safe_float(value)
+        elif token in {"weightkg", "weight"}:
+            weight_kg = _safe_float(value)
+    if height_m and height_m > 0 and weight_kg and weight_kg > 0:
+        return _sanitize_bmi_value(weight_kg / (height_m * height_m))
+
+    return None
 
 
 def _clean_note(value: Any) -> str | None:
@@ -648,6 +708,13 @@ def _load_redcap_metadata(path: Path) -> dict[str, dict[str, Any]]:
             return ""
         return str(row[pos]).strip()
 
+    def _first_value(row: list[str], keys: list[str]) -> Any:
+        for key in keys:
+            candidate = _coerce_scalar(_value(row, key))
+            if candidate is not None:
+                return candidate
+        return None
+
     out: dict[str, dict[str, Any]] = {}
     for row in rows[1:]:
         participant = normalize_participant_id(_value(row, "redcap_survey_identifier"))
@@ -663,6 +730,7 @@ def _load_redcap_metadata(path: Path) -> dict[str, dict[str, Any]]:
 
         out[participant] = {
             "age": _coerce_scalar(_value(row, "age")),
+            "bmi": _first_value(row, ["sb_bmi", "bmi", "body_mass_index", "bmi_calc"]),
             "sex_asab": _coerce_scalar(_value(row, "asab")),
             "gender": _coerce_scalar(_value(row, "gender")),
             "recording_datetime": recording_dt,
@@ -826,7 +894,7 @@ def _resolve_task_notes(entry: dict[str, Any] | None, session_class: str | None)
     notes = entry.get("notes", {})
     out: dict[str, str] = {}
     for task_key, column in columns.items():
-        value = _clean_note(notes.get(column))
+        value = _get_note_by_column_name(notes, column)
         if value:
             out[task_key] = value
     return out
@@ -836,6 +904,32 @@ def _append_note(existing: str | None, extra: str) -> str:
     if not existing:
         return extra
     return f"{existing}\n\n{extra}"
+
+
+def _normalize_note_column_key(name: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(name or "").strip().lower())
+
+
+def _get_note_by_column_name(notes_map: dict[str, Any], column_name: str) -> str | None:
+    direct = _clean_note(notes_map.get(column_name))
+    if direct:
+        return direct
+
+    target = _normalize_note_column_key(column_name)
+    for key, value in notes_map.items():
+        if _normalize_note_column_key(key) == target:
+            cleaned = _clean_note(value)
+            if cleaned:
+                return cleaned
+    return None
+
+
+def _get_first_matching_note(notes_map: dict[str, Any], column_names: list[str]) -> str | None:
+    for column_name in column_names:
+        value = _get_note_by_column_name(notes_map, column_name)
+        if value:
+            return value
+    return None
 
 
 def _resolve_ecg_config(recording_date: date | None) -> str:
@@ -902,6 +996,18 @@ def build_subject_metadata(participant: str, session: str, task: str) -> dict[st
     )
 
     redcap_entry = redcap_data.get(participant_id, {})
+    group_cc_entry = group_cc.get(participant_id, {})
+    group_lc_entry = group_lc.get(participant_id, {})
+
+    bmi_value = _resolve_bmi_from_group_entry(group_cc_entry)
+    bmi_source = "group_info_cc" if bmi_value is not None else None
+    if bmi_value is None:
+        bmi_value = _resolve_bmi_from_group_entry(group_lc_entry)
+        bmi_source = "group_info_lc" if bmi_value is not None else bmi_source
+    if bmi_value is None:
+        bmi_value = _sanitize_bmi_value(redcap_entry.get("bmi"))
+        bmi_source = "redcap" if bmi_value is not None else None
+
     questionnaire_values = redcap_entry.get("questionnaires", {})
     questionnaires_interpreted = _build_interpreted_questionnaires(
         questionnaire_values,
@@ -937,9 +1043,20 @@ def build_subject_metadata(participant: str, session: str, task: str) -> dict[st
     mri_notes = None
     additional_notes: list[str] = []
     if notes_entry:
-        overall_notes = _clean_note(notes_entry["fields"].get("Overall Notes"))
-        setup_notes = _clean_note(notes_entry["notes"].get("Setup - Notes"))
-        mri_notes = _clean_note(notes_entry["notes"].get("MRI Notes"))
+        overall_notes = _get_first_matching_note(notes_entry["fields"], ["Overall Notes"])
+        setup_notes = _get_first_matching_note(
+            notes_entry["notes"],
+            ["Setup - Notes", "Setup Notes"],
+        )
+        if setup_notes is None:
+            setup_notes = _get_first_matching_note(
+                notes_entry["fields"],
+                ["Setup - Notes", "Setup Notes"],
+            )
+        mri_notes = _get_first_matching_note(
+            notes_entry["notes"],
+            ["MRI Notes", "MRI - Notes"],
+        )
         additional_notes = list(notes_entry.get("additional_session_notes", []))
 
     schedule_notes = _clean_note(schedule_entry.get("notes") if schedule_entry else None)
@@ -958,6 +1075,8 @@ def build_subject_metadata(participant: str, session: str, task: str) -> dict[st
         "gender": gender_raw,
         "gender_label": gender_label,
         "age": redcap_entry.get("age"),
+        "bmi": bmi_value,
+        "bmi_source": bmi_source,
         "ecg_configuration": ecg_configuration,
         "researchers": researchers,
         "neuropsych": _resolve_neuropsych_summary(participant_id, neuro_map),

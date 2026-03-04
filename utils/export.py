@@ -15,6 +15,44 @@ import config
 from utils.peak_editing import calculate_peak_delta, get_edited_peaks_info
 
 
+def _align_series_to_samples(time_src, values_src, n_samples, sampling_rate):
+    """
+    Interpolate a lower-rate series (e.g., 4 Hz derived metrics) to full sample length.
+    """
+    n_samples = int(n_samples)
+    if n_samples <= 0:
+        return np.array([], dtype=float)
+
+    x_full = np.arange(n_samples, dtype=float) / float(sampling_rate)
+    x = np.asarray(time_src, dtype=float).ravel() if time_src is not None else np.array([], dtype=float)
+    y = np.asarray(values_src, dtype=float).ravel() if values_src is not None else np.array([], dtype=float)
+
+    if x.size == 0 or y.size == 0:
+        return np.full(n_samples, np.nan, dtype=float)
+
+    n = min(x.size, y.size)
+    x = x[:n]
+    y = y[:n]
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+
+    if x.size == 0:
+        return np.full(n_samples, np.nan, dtype=float)
+    if x.size == 1:
+        return np.full(n_samples, float(y[0]), dtype=float)
+
+    order = np.argsort(x)
+    x = x[order]
+    y = y[order]
+    x_unique, idx_unique = np.unique(x, return_index=True)
+    y_unique = y[idx_unique]
+
+    if x_unique.size == 1:
+        return np.full(n_samples, float(y_unique[0]), dtype=float)
+    return np.interp(x_full, x_unique, y_unique)
+
+
 def create_combined_dataframe(results_dict, sampling_rate):
     """
     Create combined DataFrame with all signals and peak columns
@@ -33,7 +71,7 @@ def create_combined_dataframe(results_dict, sampling_rate):
         Combined dataframe with time and all signal columns
     """
     max_length = 0
-    for signal_type in ['ecg', 'rsp', 'ppg', 'bp']:
+    for signal_type in ['ecg', 'rsp', 'ppg', 'bp', 'doppler']:
         if signal_type in results_dict and results_dict[signal_type] is not None:
             max_length = max(max_length, len(results_dict[signal_type]['raw']))
 
@@ -113,9 +151,48 @@ def create_combined_dataframe(results_dict, sampling_rate):
             bp_result['current_troughs'],
             signal_length
         )
-        data['bp_sbp'] = bp_result['sbp_signal'].astype(config.EXPORT_DTYPE_SIGNALS)
-        data['bp_dbp'] = bp_result['dbp_signal'].astype(config.EXPORT_DTYPE_SIGNALS)
-        data['bp_mbp'] = bp_result['mbp_signal'].astype(config.EXPORT_DTYPE_SIGNALS)
+        if all(k in bp_result for k in ('sbp_signal', 'dbp_signal', 'mbp_signal')):
+            data['bp_sbp'] = np.asarray(bp_result['sbp_signal'], dtype=float).astype(config.EXPORT_DTYPE_SIGNALS)
+            data['bp_dbp'] = np.asarray(bp_result['dbp_signal'], dtype=float).astype(config.EXPORT_DTYPE_SIGNALS)
+            data['bp_mbp'] = np.asarray(bp_result['mbp_signal'], dtype=float).astype(config.EXPORT_DTYPE_SIGNALS)
+        else:
+            time_4hz = bp_result.get('time_4hz')
+            data['bp_sbp'] = _align_series_to_samples(
+                time_4hz, bp_result.get('sbp_4hz'), signal_length, sampling_rate
+            ).astype(config.EXPORT_DTYPE_SIGNALS)
+            data['bp_dbp'] = _align_series_to_samples(
+                time_4hz, bp_result.get('dbp_4hz'), signal_length, sampling_rate
+            ).astype(config.EXPORT_DTYPE_SIGNALS)
+            data['bp_mbp'] = _align_series_to_samples(
+                time_4hz, bp_result.get('map_4hz'), signal_length, sampling_rate
+            ).astype(config.EXPORT_DTYPE_SIGNALS)
+
+    if 'doppler' in results_dict and results_dict['doppler'] is not None:
+        doppler_result = results_dict['doppler']
+        signal_length = len(doppler_result['raw'])
+
+        data['doppler_raw'] = doppler_result['raw'].astype(config.EXPORT_DTYPE_SIGNALS)
+        data['doppler_filtered'] = doppler_result['filtered'].astype(config.EXPORT_DTYPE_SIGNALS)
+        data['doppler_systolic_onsets'] = calculate_peak_delta(
+            doppler_result['auto_peaks'],
+            doppler_result['current_peaks'],
+            signal_length
+        )
+        data['doppler_diastolic_onsets'] = calculate_peak_delta(
+            doppler_result['auto_troughs'],
+            doppler_result['current_troughs'],
+            signal_length
+        )
+        time_4hz = doppler_result.get('time_4hz')
+        data['doppler_sbp'] = _align_series_to_samples(
+            time_4hz, doppler_result.get('sbp_4hz'), signal_length, sampling_rate
+        ).astype(config.EXPORT_DTYPE_SIGNALS)
+        data['doppler_dbp'] = _align_series_to_samples(
+            time_4hz, doppler_result.get('dbp_4hz'), signal_length, sampling_rate
+        ).astype(config.EXPORT_DTYPE_SIGNALS)
+        data['doppler_mbp'] = _align_series_to_samples(
+            time_4hz, doppler_result.get('map_4hz'), signal_length, sampling_rate
+        ).astype(config.EXPORT_DTYPE_SIGNALS)
 
     df = pd.DataFrame(data)
     return df
@@ -277,17 +354,49 @@ def create_metadata_json(results_dict, params_dict, sampling_rate, subject_metad
         }
         columns.extend(["bp_raw", "bp_filtered", "bp_systolic_onsets", "bp_diastolic_onsets", "bp_sbp", "bp_dbp", "bp_mbp"])
 
+    if 'doppler' in results_dict and results_dict['doppler'] is not None:
+        doppler_result = results_dict['doppler']
+        doppler_params = params_dict.get('doppler', {})
+        peaks_info = get_edited_peaks_info(
+            doppler_result['auto_peaks'],
+            doppler_result['current_peaks']
+        )
+        troughs_info = get_edited_peaks_info(
+            doppler_result['auto_troughs'],
+            doppler_result['current_troughs']
+        )
+
+        metadata['Doppler'] = {
+            "FilteringMethod": doppler_params.get('filter_method', 'sg_wavelet'),
+            "DelineationMethod": doppler_params.get('peak_method', 'delineator'),
+            "AutoDetectedSystolicPeaks": int(peaks_info['auto_count']),
+            "AutoDetectedDiastolicTroughs": int(troughs_info['auto_count']),
+            "ManuallyAddedSystolicPeaks": int(peaks_info['added_count']),
+            "DeletedSystolicPeaks": int(peaks_info['deleted_count']),
+            "ManuallyAddedDiastolicTroughs": int(troughs_info['added_count']),
+            "DeletedDiastolicTroughs": int(troughs_info['deleted_count']),
+            "FinalCardiacCycles": int(min(peaks_info['final_count'], troughs_info['final_count'])),
+        }
+        if doppler_result.get('noisy_rule') is not None:
+            metadata['Doppler']['NoisyRule'] = doppler_result.get('noisy_rule')
+            metadata['Doppler']['NoisyPercentage'] = float(doppler_result.get('noisy_percentage', np.nan))
+        columns.extend([
+            "doppler_raw", "doppler_filtered",
+            "doppler_systolic_onsets", "doppler_diastolic_onsets",
+            "doppler_sbp", "doppler_dbp", "doppler_mbp"
+        ])
+
     metadata['Columns'] = columns
 
     total_edits = 0
-    for signal_key in ['ECG', 'RSP', 'PPG', 'BloodPressure']:
+    for signal_key in ['ECG', 'RSP', 'PPG', 'BloodPressure', 'Doppler']:
         if signal_key in metadata:
             if signal_key == 'RSP':
                 total_edits += metadata[signal_key].get('ManuallyAddedInhalations', 0)
                 total_edits += metadata[signal_key].get('DeletedInhalations', 0)
                 total_edits += metadata[signal_key].get('ManuallyAddedExhalations', 0)
                 total_edits += metadata[signal_key].get('DeletedExhalations', 0)
-            elif signal_key == 'BloodPressure':
+            elif signal_key in ('BloodPressure', 'Doppler'):
                 total_edits += metadata[signal_key].get('ManuallyAddedSystolicPeaks', 0)
                 total_edits += metadata[signal_key].get('DeletedSystolicPeaks', 0)
                 total_edits += metadata[signal_key].get('ManuallyAddedDiastolicTroughs', 0)

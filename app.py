@@ -4848,7 +4848,7 @@ def main():
             help="Base output directory."
         )
 
-        processed_signals = [s for s in ["ecg", "rsp", "ppg", "bp"] if st.session_state.get(f"{s}_result")]
+        processed_signals = [s for s in ["ecg", "rsp", "ppg", "bp", "doppler"] if st.session_state.get(f"{s}_result")]
 
         if not processed_signals:
             st.warning("No signals have been processed yet.")
@@ -4882,6 +4882,53 @@ def main():
                     bp_result['hr_from_bp'] = hr['hr_interpolated']
                     results_dict['bp'] = bp_result
                     params_dict['bp'] = st.session_state.bp_params
+
+                if st.session_state.doppler_result is not None:
+                    from metrics.doppler import calculate_doppler_metrics, extract_template_and_score
+                    doppler_result = st.session_state.doppler_result.copy()
+
+                    doppler_metrics = calculate_doppler_metrics(
+                        doppler_result['filtered'],
+                        doppler_result['current_peaks'],
+                        doppler_result['current_troughs'],
+                        sampling_rate
+                    )
+                    _, current_beat_scores = extract_template_and_score(
+                        doppler_result['filtered'],
+                        doppler_result['current_troughs']
+                    )
+                    noisy_windows, noisy_sample_mask = compute_doppler_noisy_windows(
+                        signal_length=len(doppler_result['filtered']),
+                        sampling_rate=sampling_rate,
+                        trough_indices=doppler_result['current_troughs'],
+                        beat_quality_scores=current_beat_scores,
+                        window_sec=10.0,
+                        step_sec=5.0,
+                        quality_threshold=0.8,
+                    )
+
+                    t_4hz = doppler_metrics.get('time_4hz', np.array([]))
+                    noisy_mask_4hz = np.zeros(len(t_4hz), dtype=bool)
+                    if len(t_4hz) > 0 and len(noisy_windows) > 0:
+                        for w_start, w_end in noisy_windows:
+                            noisy_mask_4hz |= (t_4hz >= w_start) & (t_4hz <= w_end)
+                        for k in ('sbp_4hz', 'dbp_4hz', 'map_4hz'):
+                            if k in doppler_metrics and doppler_metrics[k] is not None:
+                                arr = np.asarray(doppler_metrics[k], dtype=float).copy()
+                                arr[noisy_mask_4hz] = np.nan
+                                doppler_metrics[k] = arr
+
+                    doppler_result.update(doppler_metrics)
+                    doppler_result['noisy_rule'] = {
+                        "window_sec": 10.0,
+                        "step_sec": 5.0,
+                        "quality_threshold": 0.8,
+                    }
+                    doppler_result['noisy_percentage'] = (
+                        100.0 * float(np.mean(noisy_sample_mask)) if len(noisy_sample_mask) > 0 else 0.0
+                    )
+                    results_dict['doppler'] = doppler_result
+                    params_dict['doppler'] = st.session_state.doppler_params
 
                 # Create files
                 df = export.create_combined_dataframe(results_dict, sampling_rate)

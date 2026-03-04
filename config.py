@@ -595,7 +595,7 @@ STRUCTURAL_OVERLAYS = {
     'T2starmap':   {'colormap': 'plasma',    'opacity': 0.9, 'label': 'T2* Map'},
     'SWI':         {'colormap': 'viridis',      'opacity': 0.9, 'label': 'SWI'},
     'FLAIR':       {'colormap': 'thermal',      'opacity': 0.9, 'label': 'FLAIR'},
-    'T1map':       {'colormap': 'electric_blue',   'invert': True, 'opacity': 0.9, 'label': 'T1 Map'},
+    'T1map':       {'colormap': 'electric_blue',   'invert': True, 'opacity': 0.9, 'label': 'T1 Map', 'cal_min':750, 'cal_max': 4500},
 }
 
 # Default overlay settings for the functional tab

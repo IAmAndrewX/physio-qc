@@ -1,0 +1,12 @@
+{
+  "description": "Trigger channel had abnormally low voltage in ses-04. Gas task needed very low threshold with 25s manual start offset. Rest needed low threshold. Breath used normal detection.",
+  "tasks": {
+    "gas": {
+      "threshold": 0.005,
+      "acquisition_start": 25.0
+    },
+    "rest": {
+      "threshold": 0.01
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "description": "No trigger pulses detected in MRI sessions. Recording started at scan start. Manual trim window used.",
+  "defaults": {
+    "skip_triggers": true,
+    "acquisition_start": 0.0,
+    "acquisition_end": 1153.0
+  }
+}

@@ -3,6 +3,10 @@ Configuration file for physiological signal QC
 Edit these values to match your setup and data requirements
 """
 
+import csv as _csv
+import json as _json
+from pathlib import Path as _Path
+
 # =============================================================================
 # PATHS
 # =============================================================================
@@ -33,18 +37,92 @@ PMU_SCAN_GAP_SECONDS = 10.0
 PMU_TIME_MATCH_TOLERANCE_SECONDS = 30.0
 PMU_PREFER_SCANNER_SIGNALS = True
 
+# MRI trigger detection for sessions 02/04
+# Channel matched by: name contains one of these substrings (case-insensitive)
+MRI_SESSION_ALIASES = ['ses-02', 'ses-2', 'ses-04', 'ses-4']
+TRIGGER_CHANNEL_PATTERNS = ['trigger', 'ami']
+TRIGGER_THRESHOLD = 4.0       # Volts
+TRIGGER_REFRACTORY_S = 1.5    # seconds between pulses
+TRIGGER_TR = 1.72             # TR in seconds (for computing acquisition end)
+
+# Subject-specific trigger overrides (JSON files in static/trigger_overrides/)
+# Filenames: sub-{ID}.json or sub-{ID}_ses-{SS}.json
+# See static/trigger_overrides/ for schema and examples.
+TRIGGER_OVERRIDE_DIR = _Path(__file__).parent / 'static' / 'trigger_overrides'
+
+
+def load_trigger_overrides(participant, session, task):
+    """Load trigger detection overrides for a specific participant/session/task.
+
+    Checks for (in priority order):
+      1. sub-{ID}_ses-{SS}.json  (session-specific)
+      2. sub-{ID}.json           (participant-wide)
+
+    Returns dict with possible keys: threshold, refractory_s, acquisition_start,
+    acquisition_end, skip_triggers.  Missing keys → use global defaults.
+    """
+    pid = str(participant).replace('sub-', '').strip() if participant else ''
+    sess = str(session).strip().lower().replace('ses-', '').lstrip('0') or '0'
+    sess_padded = sess.zfill(2)
+    task_norm = str(task).strip().lower() if task else ''
+
+    result = {}
+
+    candidates = [
+        TRIGGER_OVERRIDE_DIR / f'sub-{pid}_ses-{sess_padded}.json',
+        TRIGGER_OVERRIDE_DIR / f'sub-{pid}_ses-{sess}.json',
+        TRIGGER_OVERRIDE_DIR / f'sub-{pid}.json',
+    ]
+    data = None
+    for path in candidates:
+        if path.exists():
+            with open(path) as f:
+                data = _json.load(f)
+            break
+    if data is None:
+        return result
+
+    # Merge defaults then task-specific overrides
+    defaults = data.get('defaults', {})
+    result.update({k: v for k, v in defaults.items() if v is not None})
+    task_overrides = data.get('tasks', {}).get(task_norm, {})
+    result.update({k: v for k, v in task_overrides.items() if v is not None})
+
+    return result
+
+
+# Physio sessions: map to corresponding MRI session for expected duration lookup
+# ses-1 → ses-02 (MRI), ses-3 → ses-04 (MRI)
+PHYSIO_TO_MRI_SESSION = {
+    'ses-1': '02', 'ses-01': '02', 'ses-a': '02', 'a': '02',
+    'ses-3': '04', 'ses-03': '04',
+}
+
 # Fallback Biopac channel for spirometer waveform (1-based index)
 SPIROMETER_CHANNEL_INDEX = 12
 
 # Phenotype/metadata CSVs used for participant demographics and experiment notes
-PHENOTYPE_BASE_PATH = '/export02/projects/LCS_Management/05_phenotype/redcap_exports'
-PHENOTYPE_REDCAP_PATH = f'{PHENOTYPE_BASE_PATH}/InvestigationOfTheLo_DATA_2026-02-10_1414.csv'
-PHENOTYPE_REDCAP_DEFINITIONS_PATH = f'{PHENOTYPE_BASE_PATH}/REDCap_variables_definitions.xlsx'
-PHENOTYPE_GROUP_INFO_CC_PATH = f'{PHENOTYPE_BASE_PATH}/Group_InfoSession_Data(CC).csv'
-PHENOTYPE_GROUP_INFO_LC_PATH = f'{PHENOTYPE_BASE_PATH}/Group_InfoSession_Data(LC).csv'
-PHENOTYPE_TESTING_SCHEDULE_PATH = f'{PHENOTYPE_BASE_PATH}/Testing_Schedule(Sheet1).csv'
-PHENOTYPE_NOTES_SESSION_A_PATH = f'{PHENOTYPE_BASE_PATH}/LC_Experiments_Notes_v2(Session A (Physio)).csv'
-PHENOTYPE_NOTES_SESSION_B_PATH = f'{PHENOTYPE_BASE_PATH}/LC_Experiments_Notes_v2(Session B (MRI)).csv'
+# Files are date-tagged (e.g. _2026-02-26_1235.csv); _latest_phenotype_file()
+# resolves the newest version automatically.
+PHENOTYPE_BASE_PATH = '/export02/projects/LCS/05_phenotype/redcap_exports'
+
+def _latest_phenotype_file(prefix, ext='csv'):
+    """Return the path to the newest date-tagged file matching ``prefix*.<ext>``."""
+    from pathlib import Path
+    matches = sorted(Path(PHENOTYPE_BASE_PATH).glob(f'{prefix}*_????-??-??_????.{ext}'))
+    if matches:
+        return str(matches[-1])
+    # Fallback: any file starting with prefix
+    fallback = sorted(Path(PHENOTYPE_BASE_PATH).glob(f'{prefix}*.{ext}'))
+    return str(fallback[-1]) if fallback else f'{PHENOTYPE_BASE_PATH}/{prefix}.{ext}'
+
+PHENOTYPE_REDCAP_PATH = _latest_phenotype_file('InvestigationOfTheLo_DATA')
+PHENOTYPE_REDCAP_DEFINITIONS_PATH = _latest_phenotype_file('REDCap_variables_definitions', ext='xlsx')
+PHENOTYPE_GROUP_INFO_CC_PATH = _latest_phenotype_file('Group_InfoSession_Data_CC')
+PHENOTYPE_GROUP_INFO_LC_PATH = _latest_phenotype_file('Group_InfoSession_Data_LC')
+PHENOTYPE_TESTING_SCHEDULE_PATH = _latest_phenotype_file('Testing_Schedule_Sheet1')
+PHENOTYPE_NOTES_SESSION_A_PATH = _latest_phenotype_file('LC_Experiments_Notes_v2_Session_A_Physio')
+PHENOTYPE_NOTES_SESSION_B_PATH = _latest_phenotype_file('LC_Experiments_Notes_v2_Session_B_MRI')
 
 # Metadata view defaults
 CORE_QUESTIONNAIRE_FIELDS = ['sc_tot_score', 'phq9_total_score', 'vafs']
@@ -368,12 +446,12 @@ ETCO2_PEAK_METHOD_INFO = {
 
 DEFAULT_ETCO2_PARAMS = {
     'peak_method': 'diff',
-    'min_peak_distance_s': 2.0,      # Minimum 2s between breaths (30 breaths/min max)
-    'min_prominence': 1.0,            # Minimum 1 mmHg prominence
-    'sg_window_s': 0.3,               # 300ms Savitzky-Golay smoothing window
+    'min_peak_distance_s': 3.0,      # Minimum 3s between breaths (20 breaths/min max)
+    'min_prominence': 3.0,            # Minimum 3 mmHg prominence
+    'sg_window_s': 0.2,               # 200ms Savitzky-Golay smoothing window
     'sg_poly': 2,                     # Quadratic polynomial for S-G filter
     'prom_adapt': False,              # Disable adaptive prominence by default
-    'smooth_peaks': 5                 # Median filter over 5 peaks
+    'smooth_peaks': 3                 # Median filter over 3 peaks
 }
 
 # =============================================================================
@@ -393,11 +471,11 @@ ETO2_TROUGH_METHOD_INFO = {
 DEFAULT_ETO2_PARAMS = {
     'trough_method': 'diff',
     'min_trough_distance_s': 3.0,    # Minimum 3s between troughs (slower than peaks)
-    'min_prominence': 1.0,            # Minimum 1 mmHg prominence (on inverted signal)
+    'min_prominence': 6.0,            # Minimum 6 mmHg prominence (on inverted signal)
     'sg_window_s': 0.2,               # 200ms Savitzky-Golay smoothing window
     'sg_poly': 2,                     # Quadratic polynomial for S-G filter
     'prom_adapt': False,              # Disable adaptive prominence by default
-    'smooth_troughs': 5               # Median filter over 5 troughs
+    'smooth_troughs': 3               # Median filter over 3 troughs
 }
 
 # =============================================================================
@@ -424,81 +502,127 @@ DEFAULT_SPO2_PARAMS = {
 }
 
 # =============================================================================
-# TASK EVENT PROTOCOLS (vertical line annotations on plots)
+# TASK EVENT PROTOCOLS (onset CSV files)
 # =============================================================================
-# Each entry: (time_in_seconds, label, hex_color)
-# Timings are from protocol start (t=0 at recording start).
+# Events are loaded from BIDS-style onset CSVs: onset,duration,trial_type
+# Each file lives in static/onsets/. Gas variant (short/long) is resolved
+# per-participant from bids_summary.csv.
 
-TASK_EVENTS = {
-    # Breathing task (9 min = 540 s)
-    # Sequence: [Baseline-Fast-Baseline-Slow] x2 + Final Baseline
-    'breath': [
-        (0,   'Baseline',       '#888888'),
-        (60,  'Fast Breathing', '#FF9F43'),
-        (120, 'Baseline',       '#888888'),
-        (180, 'Slow Breathing', '#54A0FF'),
-        (240, 'Baseline',       '#888888'),
-        (300, 'Fast Breathing', '#FF9F43'),
-        (360, 'Baseline',       '#888888'),
-        (420, 'Slow Breathing', '#54A0FF'),
-        (480, 'Baseline',       '#888888'),
-    ],
-    # Gas challenge (12 min = 720 s)
-    # Use simple condition labels for consistency: Air / Hypercapnia / Hypoxia
-    'gas': [
-        (0,   'Air',         '#888888'),
-        (60,  'Hypercapnia', '#FF6B6B'),
-        (180, 'Air',         '#1DD1A1'),
-        (300, 'Hypoxia',     '#A78BFA'),
-        (480, 'Air',         '#1DD1A1'),
-        (720, 'Gas Off',     '#F8F9FA'),
-    ],
-    # Rest (8 min = 480 s) — no mid-task events
-    'rest': [],
-    # STS (Session 1): 0-5 min supine, then stand at 5 min
-    'sts': [
-        (0,   'Supine', '#54A0FF'),
-        (300, 'Stand',  '#FF6B6B'),
-    ],
-    # Cold pressor (Session A): 5 cycles of 90s rest + 60s cold immersion
-    'coldpress': [
-        (0,   'Rest 1',       '#888888'),
-        (90,  'Cold 1',       '#60A5FA'),
-        (150, 'Rest 2',       '#888888'),
-        (240, 'Cold 2',       '#60A5FA'),
-        (300, 'Rest 3',       '#888888'),
-        (390, 'Cold 3',       '#60A5FA'),
-        (450, 'Rest 4',       '#888888'),
-        (540, 'Cold 4',       '#60A5FA'),
-        (600, 'Rest 5',       '#888888'),
-        (690, 'Cold 5',       '#60A5FA'),
-        (750, 'Rest 6',       '#888888'),
-        (840, 'Off',          '#F8F9FA'),
-    ],
+ONSET_DIR = _Path(__file__).parent / 'static' / 'onsets'
+
+ONSET_FILES = {
+    'breath':    ONSET_DIR / 'onsets_breathing.csv',
+    'gas-short': ONSET_DIR / 'onsets_gas-short.csv',
+    'gas-long':  ONSET_DIR / 'onsets_gas-long.csv',
+    'sts':       ONSET_DIR / 'onsets_sts.csv',
+    'coldpress': ONSET_DIR / 'onsets_coldpress.csv',
+    'rest':      ONSET_DIR / 'onsets_rest.csv',
 }
 
-# Participant-specific task protocol overrides.
-# Keys are participant prefixes (lowercase), values are {task_key: events}.
-#
-# sub-00 gas challenge protocol (operator table / screenshot):
-# Total timeline = 1140 s with repeated Hypercapnia/Hypoxia blocks.
-# Keep naming aligned to default gas labels (Air / Hypercapnia / Hypoxia).
-TASK_EVENTS_PARTICIPANT_OVERRIDES = {
-    'sub-00': {
-        'gas': [
-            (0,    'Air',         '#888888'),
-            (60,   'Hypercapnia', '#FF6B6B'),
-            (180,  'Air',         '#1DD1A1'),
-            (240,  'Hypoxia',     '#A78BFA'),
-            (420,  'Air',         '#1DD1A1'),
-            (600,  'Hypercapnia', '#FF6B6B'),
-            (720,  'Air',         '#1DD1A1'),
-            (780,  'Hypoxia',     '#A78BFA'),
-            (960,  'Air',         '#1DD1A1'),
-            (1140, 'Gas Off',     '#F8F9FA'),
-        ],
-    },
+TRIAL_TYPE_COLORS = {
+    'Hypercapnia': '#FF6B6B',
+    'Hypoxia':     '#A78BFA',
+    'Fast':        '#FF9F43',
+    'Slow':        '#54A0FF',
+    'Stand':       '#FF6B6B',
+    'Cold':        '#60A5FA',
+    'Valsalva':    '#FF6B6B',
 }
+TRIAL_TYPE_DEFAULT_COLOR = '#888888'
+
+# Gas variant lookup from bids_summary.csv: nvols >= 600 → long, >= 350 → short
+BIDS_SUMMARY_PATH = '/export02/projects/LCS/BIDS/code/bids_summary.csv'
+
+def _load_gas_variant_map():
+    """Build {participant_id: 'gas-long'|'gas-short'} from bids_summary.csv."""
+    mapping = {}
+    try:
+        with open(BIDS_SUMMARY_PATH) as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                pid = row['ID'].strip()
+                nvols = row.get('bold_task-gas_nvols', '').strip()
+                if not nvols or not nvols.isdigit():
+                    continue
+                n = int(nvols)
+                if n >= 600:
+                    mapping[pid] = 'gas-long'
+                elif n >= 350:
+                    mapping[pid] = 'gas-short'
+    except FileNotFoundError:
+        pass
+    return mapping
+
+GAS_VARIANT_MAP = _load_gas_variant_map()
+
+
+def _load_bids_summary():
+    """Load bids_summary.csv into a list of dicts (once at import time)."""
+    rows = []
+    try:
+        with open(BIDS_SUMMARY_PATH) as f:
+            reader = _csv.DictReader(f)
+            for row in reader:
+                rows.append(row)
+    except FileNotFoundError:
+        pass
+    return rows
+
+_BIDS_SUMMARY_ROWS = _load_bids_summary()
+
+
+def get_expected_duration(participant, session, task):
+    """Look up expected scan duration (seconds) from bids_summary.csv.
+
+    Returns float duration or None if not found.
+    """
+    if not _BIDS_SUMMARY_ROWS:
+        return None
+    pid = str(participant).replace('sub-', '').strip()
+    sess_norm = str(session).strip().lower()
+    # For physio sessions, map to the corresponding MRI session
+    mri_sess = PHYSIO_TO_MRI_SESSION.get(sess_norm)
+    if mri_sess is None:
+        # Already an MRI session — extract digits
+        mri_sess = sess_norm.replace('ses-', '').replace('ses', '').strip().zfill(2)
+    else:
+        mri_sess = mri_sess.zfill(2)
+    # Normalise task key for bids_summary column lookup
+    task_norm = str(task).strip().lower().replace('-', '').replace('_', '')
+    # Map common aliases to bids column names
+    task_col_map = {
+        'gas': 'bold_task-gas_nvols', 'gaschallenge': 'bold_task-gas_nvols',
+        'rest': 'bold_task-rest_nvols', 'resting': 'bold_task-rest_nvols',
+        'breath': 'bold_task-breath_nvols', 'breathing': 'bold_task-breath_nvols',
+    }
+    col = task_col_map.get(task_norm)
+    if col is None:
+        return None
+    for row in _BIDS_SUMMARY_ROWS:
+        row_id = row.get('ID', '').strip()
+        row_sess = row.get('session', '').strip().zfill(2)
+        if row_id == pid and row_sess == mri_sess:
+            nvols_str = row.get(col, '').strip()
+            if nvols_str and nvols_str.isdigit() and int(nvols_str) > 0:
+                return int(nvols_str) * TRIGGER_TR
+    return None
+
+
+def load_onset_events(task_key):
+    """Load onset CSV → list of (onset, duration, trial_type, color) tuples."""
+    path = ONSET_FILES.get(task_key)
+    if not path or not _Path(path).exists():
+        return []
+    events = []
+    with open(path) as f:
+        reader = _csv.DictReader(f)
+        for row in reader:
+            onset = float(row['onset'])
+            duration = float(row['duration'])
+            trial_type = row['trial_type']
+            color = TRIAL_TYPE_COLORS.get(trial_type, TRIAL_TYPE_DEFAULT_COLOR)
+            events.append((onset, duration, trial_type, color))
+    return events
 
 # Map task names from filenames to protocol keys
 # Normalised: lowered, stripped of hyphens/underscores
@@ -596,6 +720,7 @@ STRUCTURAL_OVERLAYS = {
     'SWI':         {'colormap': 'viridis',      'opacity': 0.9, 'label': 'SWI'},
     'FLAIR':       {'colormap': 'thermal',      'opacity': 0.9, 'label': 'FLAIR'},
     'T1map':       {'colormap': 'electric_blue',   'invert': True, 'opacity': 0.9, 'label': 'T1 Map', 'cal_min':750, 'cal_max': 4500},
+    'QSM':         {'colormap': 'cold_hot',    'opacity': 0.9, 'label': 'QSM (Chi Map)', 'cal_min': -0.1, 'cal_max': 0.1},
 }
 
 # Default overlay settings for the functional tab

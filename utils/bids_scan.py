@@ -171,6 +171,12 @@ def get_structural_images(bids_path, derivatives_path, participant, session,
                 images['T1map'] = str(f)
                 break
 
+    # QSM (Chi map from ASPIRE T2starw — in sMRI derivatives, not coregistered)
+    if smri_anat and smri_anat.exists():
+        for f in sorted(smri_anat.glob(f'{participant}_{session}_T2starw_Chimap.nii*')):
+            images['QSM'] = str(f)
+            break
+
     return images
 
 

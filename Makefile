@@ -4,6 +4,7 @@ VENV ?= .venv
 PYTHON ?= $(VENV)/bin/python
 PIP ?= $(VENV)/bin/pip
 STREAMLIT ?= $(VENV)/bin/streamlit
+PORT ?= 8501
 RUFF ?= $(VENV)/bin/ruff
 MYPY ?= $(VENV)/bin/mypy
 PYTEST ?= $(VENV)/bin/pytest
@@ -21,8 +22,10 @@ install-dev:  ## Create .venv and install runtime + dev dependencies
 	$(PYTHON) -m pip install --upgrade pip
 	$(PIP) install -e ".[dev]"
 
-run:  ## Run the Streamlit application
-	$(STREAMLIT) run app.py
+run:  ## Run the Streamlit application (PORT=XXXX to override)
+	@# Remove broken symlinks in static/ left over from previous sessions
+	@find static/ -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+	$(STREAMLIT) run app.py --server.port $(PORT)
 
 clean:  ## Remove virtual environment and cache files
 	rm -rf .venv
@@ -32,6 +35,7 @@ clean:  ## Remove virtual environment and cache files
 	rm -rf .coverage
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
+	find static/ -type l ! -exec test -e {} \; -delete 2>/dev/null || true
 
 lint:  ## Run linter (ruff)
 	$(RUFF) check .

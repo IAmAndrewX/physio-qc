@@ -1,0 +1,5 @@
+onset,duration,trial_type
+60,120,Hypercapnia
+240,180,Hypoxia
+600,120,Hypercapnia
+780,180,Hypoxia

@@ -190,6 +190,31 @@ def _attach_pmu_session_b_signals(df_raw, signal_mappings, participant, session,
     return df_raw, signal_mappings, status
 
 
+def _find_trigger_channel(channels):
+    """Find the MRI trigger channel by name pattern matching."""
+    patterns = [p.lower() for p in getattr(config, 'TRIGGER_CHANNEL_PATTERNS', ['trigger', 'ami'])]
+    for ch in channels:
+        name_lower = ch.name.lower()
+        if any(p in name_lower for p in patterns):
+            return ch
+    return None
+
+
+def _detect_trigger_pulses(signal, sampling_rate):
+    """Detect trigger pulses above threshold with refractory period. Returns sample indices."""
+    import numpy as np
+    threshold = getattr(config, 'TRIGGER_THRESHOLD', 4.0)
+    refractory_samples = int(getattr(config, 'TRIGGER_REFRACTORY_S', 1.5) * sampling_rate)
+    above = np.where(signal >= threshold)[0]
+    if len(above) == 0:
+        return np.array([], dtype=int)
+    pulses = [above[0]]
+    for idx in above[1:]:
+        if idx - pulses[-1] >= refractory_samples:
+            pulses.append(idx)
+    return np.array(pulses, dtype=int)
+
+
 def load_acq_file(file_path, participant=None, session=None, task=None):
     """
     Load an ACQ file and return data with metadata
@@ -263,6 +288,63 @@ def load_acq_file(file_path, participant=None, session=None, task=None):
         task=task,
     )
 
+    # Extract Valsalva escape-key markers (type_code 'defl') from .acq event markers
+    valsalva_markers = []
+    if task and 'valsalva' in str(task).lower():
+        for m in data.event_markers:
+            if m.type_code == 'defl':
+                valsalva_markers.append(m.time_index)
+
+    # Acquisition timing: detect from triggers (MRI) or expected duration (physio)
+    acquisition_start = None
+    acquisition_end = None
+    trigger_count = 0
+    trigger_override_applied = False
+    is_mri = session and str(session).strip().lower() in [
+        a.lower() for a in getattr(config, 'MRI_SESSION_ALIASES', [])
+    ]
+    if is_mri:
+        # Check for subject-specific trigger overrides
+        overrides = config.load_trigger_overrides(participant, session, task)
+        if overrides:
+            trigger_override_applied = True
+
+        if overrides.get('skip_triggers'):
+            # Manual acquisition window — no trigger detection
+            acquisition_start = overrides.get('acquisition_start', 0.0)
+            acquisition_end = overrides.get('acquisition_end')
+            trigger_count = 0
+        else:
+            trigger_ch = _find_trigger_channel(data.channels)
+            if trigger_ch is not None:
+                import numpy as np
+                threshold = overrides.get('threshold', getattr(config, 'TRIGGER_THRESHOLD', 4.0))
+                refractory_s = overrides.get('refractory_s', getattr(config, 'TRIGGER_REFRACTORY_S', 1.5))
+                refractory_samples = int(refractory_s * sampling_rate)
+                above = np.where(trigger_ch.data >= threshold)[0]
+                if len(above) == 0:
+                    pulses = np.array([], dtype=int)
+                else:
+                    pulses = [above[0]]
+                    for idx in above[1:]:
+                        if idx - pulses[-1] >= refractory_samples:
+                            pulses.append(idx)
+                    pulses = np.array(pulses, dtype=int)
+                trigger_count = len(pulses)
+                if trigger_count > 0:
+                    acq_start_from_triggers = pulses[0] / sampling_rate
+                    tr = getattr(config, 'TRIGGER_TR', 1.72)
+                    acq_end_from_triggers = pulses[-1] / sampling_rate + tr
+                    # If override specifies manual start, use it; otherwise use first trigger
+                    acquisition_start = overrides.get('acquisition_start', acq_start_from_triggers)
+                    acquisition_end = acq_end_from_triggers
+    else:
+        # Physio sessions: start at t=0, end at expected duration from bids_summary
+        acquisition_start = 0.0
+        expected = config.get_expected_duration(participant, session, task)
+        if expected is not None:
+            acquisition_end = expected
+
     return {
         'df': df_raw,
         'sampling_rate': sampling_rate,
@@ -272,4 +354,9 @@ def load_acq_file(file_path, participant=None, session=None, task=None):
         'duration': len(df_raw) / sampling_rate,
         'gas_conversions': gas_conversions,
         'pmu_status': pmu_status,
+        'valsalva_markers': valsalva_markers,
+        'acquisition_start': acquisition_start,
+        'acquisition_end': acquisition_end,
+        'trigger_count': trigger_count,
+        'trigger_override_applied': trigger_override_applied,
     }

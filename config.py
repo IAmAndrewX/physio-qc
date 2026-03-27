@@ -101,28 +101,21 @@ PHYSIO_TO_MRI_SESSION = {
 # Fallback Biopac channel for spirometer waveform (1-based index)
 SPIROMETER_CHANNEL_INDEX = 12
 
-# Phenotype/metadata CSVs used for participant demographics and experiment notes
-# Files are date-tagged (e.g. _2026-02-26_1235.csv); _latest_phenotype_file()
-# resolves the newest version automatically.
+# Phenotype/metadata CSVs used for participant demographics and experiment notes.
+# Plain filenames (no date tags) — see docs/2026-02-26-metadata-redcap-setup-runbook.md
+# for update procedure.
 PHENOTYPE_BASE_PATH = '/export02/projects/LCS/05_phenotype/redcap_exports'
 
-def _latest_phenotype_file(prefix, ext='csv'):
-    """Return the path to the newest date-tagged file matching ``prefix*.<ext>``."""
-    from pathlib import Path
-    matches = sorted(Path(PHENOTYPE_BASE_PATH).glob(f'{prefix}*_????-??-??_????.{ext}'))
-    if matches:
-        return str(matches[-1])
-    # Fallback: any file starting with prefix
-    fallback = sorted(Path(PHENOTYPE_BASE_PATH).glob(f'{prefix}*.{ext}'))
-    return str(fallback[-1]) if fallback else f'{PHENOTYPE_BASE_PATH}/{prefix}.{ext}'
+def _phenotype(name: str) -> str:
+    return f'{PHENOTYPE_BASE_PATH}/{name}'
 
-PHENOTYPE_REDCAP_PATH = _latest_phenotype_file('InvestigationOfTheLo_DATA')
-PHENOTYPE_REDCAP_DEFINITIONS_PATH = _latest_phenotype_file('REDCap_variables_definitions', ext='xlsx')
-PHENOTYPE_GROUP_INFO_CC_PATH = _latest_phenotype_file('Group_InfoSession_Data_CC')
-PHENOTYPE_GROUP_INFO_LC_PATH = _latest_phenotype_file('Group_InfoSession_Data_LC')
-PHENOTYPE_TESTING_SCHEDULE_PATH = _latest_phenotype_file('Testing_Schedule_Sheet1')
-PHENOTYPE_NOTES_SESSION_A_PATH = _latest_phenotype_file('LC_Experiments_Notes_v2_Session_A_Physio')
-PHENOTYPE_NOTES_SESSION_B_PATH = _latest_phenotype_file('LC_Experiments_Notes_v2_Session_B_MRI')
+PHENOTYPE_REDCAP_PATH = _phenotype('InvestigationOfTheLo_DATA.csv')
+PHENOTYPE_REDCAP_DEFINITIONS_PATH = _phenotype('REDCap_variables_definitions.xlsx')
+PHENOTYPE_GROUP_INFO_CC_PATH = _phenotype('Group_InfoSession_Data_CC.csv')
+PHENOTYPE_GROUP_INFO_LC_PATH = _phenotype('Group_InfoSession_Data_LC.csv')
+PHENOTYPE_TESTING_SCHEDULE_PATH = _phenotype('Testing_Schedule_Sheet1.csv')
+PHENOTYPE_NOTES_SESSION_A_PATH = _phenotype('LC_Experiments_Notes_v2_Session_A_Physio.csv')
+PHENOTYPE_NOTES_SESSION_B_PATH = _phenotype('LC_Experiments_Notes_v2_Session_B_MRI.csv')
 
 # Metadata view defaults
 CORE_QUESTIONNAIRE_FIELDS = ['sc_tot_score', 'phq9_total_score', 'vafs']

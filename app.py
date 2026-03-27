@@ -1759,8 +1759,9 @@ def render_subject_metadata_tab(metadata):
         ("Gender", gender_display),
         ("Age", metadata.get('age') if metadata.get('age') is not None else 'N/A'),
         ("BMI", bmi_display),
-        ("ECG Configuration", metadata.get('ecg_configuration') or 'N/A'),
     ]
+    if is_session_a_selected(st.session_state.get('session', '')):
+        summary_fields.append(("ECG Configuration", metadata.get('ecg_configuration') or 'N/A'))
     summary_html = "".join(
         (
             "<div style='padding:0.35rem 0.45rem;'>"

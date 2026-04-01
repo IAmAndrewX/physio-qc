@@ -99,6 +99,18 @@ def _report_script_path(name):
     return str(p)
 
 
+def _acq_time_offset():
+    """Return the acquisition start time (seconds) for re-zeroing the time axis.
+
+    For MRI sessions this is the time of the first trigger pulse so that
+    t=0 on plots corresponds to the start of the scan.  Pre-acquisition
+    samples appear at negative times.  For physio sessions (acquisition_start
+    == 0) and when no data is loaded, this returns 0.0 (no shift).
+    """
+    loaded = st.session_state.get('loaded_data') or {}
+    return loaded.get('acquisition_start') or 0.0
+
+
 def _report_run_cmd(cmd, cwd=None):
     proc = subprocess.run(
         cmd,
@@ -955,9 +967,9 @@ def create_signal_plot(time, raw, clean, current_peaks, auto_peaks, signal_name,
     hr_label = f'{signal_key}_hr'
     fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(hr_label, ''), row=3, col=1)
 
-    fig.update_xaxes(matches='x', rangemode='nonnegative')
+    fig.update_xaxes(matches='x')
     if zoom_range is not None:
-        fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
+        fig.update_xaxes(range=[zoom_range[0], zoom_range[1]])
 
     fig.update_layout(height=800, template='plotly_dark', showlegend=True, uirevision=ui_revision)
 
@@ -1156,7 +1168,7 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
     # --- Row 3: BP Metrics (SBP/MAP/DBP) or RSP Rate ---
     if is_bp_like and bp_data is not None:
     #if is_bp and bp_data is not None:
-        t_4hz = bp_data['time_4hz']
+        t_4hz = bp_data['time_4hz'] - _acq_time_offset()
         if is_doppler and noisy_mask_4hz is not None and len(noisy_mask_4hz) == len(t_4hz):
             noisy_mask_4hz = np.asarray(noisy_mask_4hz, dtype=bool)
             has_noisy = bool(np.any(noisy_mask_4hz))
@@ -1263,9 +1275,9 @@ def create_rsp_bp_plot(time, raw, clean, current_peaks, current_troughs, auto_pe
             fig.update_yaxes(title_text=config.Y_AXIS_LABELS.get(f'{prefix}_rvt', ''), row=4, col=1)
 
     # Formatting
-    fig.update_xaxes(matches='x', rangemode='nonnegative')
+    fig.update_xaxes(matches='x')
     if zoom_range is not None:
-        fig.update_xaxes(range=[max(0, zoom_range[0]), zoom_range[1]])
+        fig.update_xaxes(range=[zoom_range[0], zoom_range[1]])
 
     # Highlight Doppler noisy windows across all panels.
     if is_doppler and noisy_windows:
@@ -1421,7 +1433,7 @@ def create_doppler_beat_overlay_plot(
         end_idx = int(troughs[i + 1])
         if end_idx <= start_idx + 2:
             continue
-        mid_t = ((start_idx + end_idx) * 0.5) / float(sampling_rate)
+        mid_t = ((start_idx + end_idx) * 0.5) / float(sampling_rate) - _acq_time_offset()
         if not _in_selected_intervals(mid_t):
             continue
         candidate_count += 1
@@ -1483,56 +1495,24 @@ def create_doppler_beat_overlay_plot(
 
 
 def get_doppler_overlay_groups(task_name, participant_label, signal_duration_s):
-    """Return task-specific beat-overlay figure groups as (title, intervals)."""
+    """Return task-specific beat-overlay figure groups as (title, intervals).
+
+    Groups intervals by trial_type from the onset CSVs.
+    Times are in scan-relative coordinates (matching the shifted plot axis).
+    """
     task_key = _resolve_task_key(task_name)
-    if task_key == 'sts':
-        return [
-            ('STS: 0-5 min', [(0, 5 * 60)]),
-            ('STS: 5-15 min', [(5 * 60, 15 * 60)]),
-        ]
-
-    if task_key == 'breath':
-        return [
-            ('Normal Pace', [(0, 60), (120, 180), (240, 300), (360, 420), (480, 540)]),
-            ('Fast Pace Breathing', [(60, 120), (300, 360)]),
-            ('Slow Pace Breathing', [(180, 240), (420, 480)]),
-        ]
-
-    if task_key == 'gas':
-        events = _resolve_task_events('gas', participant_label=participant_label)
-        if not events:
-            return []
-        events = sorted(events, key=lambda x: float(x[0]))
-        total_s = float(signal_duration_s)
-        label_to_intervals = {'air': [], 'hypercapnia': [], 'hypoxia': []}
-
-        for idx, (start_t, label, _) in enumerate(events):
-            start = max(0.0, float(start_t))
-            if idx + 1 < len(events):
-                end = float(events[idx + 1][0])
-            else:
-                end = total_s
-            end = min(end, total_s)
-            if end <= start:
-                continue
-            label_norm = str(label).strip().lower()
-            if 'air' in label_norm:
-                label_to_intervals['air'].append((start, end))
-            elif 'hypercapnia' in label_norm:
-                label_to_intervals['hypercapnia'].append((start, end))
-            elif 'hypoxia' in label_norm:
-                label_to_intervals['hypoxia'].append((start, end))
-
-        groups = []
-        if label_to_intervals['air']:
-            groups.append(('Normal (Air)', label_to_intervals['air']))
-        if label_to_intervals['hypercapnia']:
-            groups.append(('Hypercapnia', label_to_intervals['hypercapnia']))
-        if label_to_intervals['hypoxia']:
-            groups.append(('Hypoxia', label_to_intervals['hypoxia']))
-        return groups
-
-    return []
+    if task_key is None:
+        return []
+    events = _resolve_task_events(task_key, participant_label=participant_label)
+    if not events:
+        return []
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for onset, duration, trial_type, _color in events:
+        if trial_type not in groups:
+            groups[trial_type] = []
+        groups[trial_type].append((onset, onset + duration))
+    return [(trial_type, intervals) for trial_type, intervals in groups.items()]
 
 
 def _resolve_task_key(task_name):
@@ -1560,20 +1540,35 @@ def _format_event_time(seconds):
 
 
 def _resolve_task_events(task_key, participant_label=None):
-    """Resolve task events with participant-specific overrides when configured."""
-    if participant_label:
-        participant_norm = str(participant_label).strip().lower()
-        for participant_prefix, per_task_overrides in config.TASK_EVENTS_PARTICIPANT_OVERRIDES.items():
-            prefix_norm = str(participant_prefix).strip().lower()
-            if participant_norm.startswith(prefix_norm):
-                override_events = per_task_overrides.get(task_key)
-                if override_events is not None:
-                    return override_events
-    return config.TASK_EVENTS.get(task_key, [])
+    """Load onset events for a task. Returns list of (onset, duration, trial_type, color).
+
+    For gas tasks, picks short/long variant per participant using bids_summary.csv.
+    For valsalva, extracts escape-key markers from the loaded .acq file.
+    """
+    if task_key == 'valsalva':
+        loaded = st.session_state.get('loaded_data') or {}
+        markers = loaded.get('valsalva_markers', [])
+        if not markers:
+            return []
+        color = config.TRIAL_TYPE_COLORS.get('Valsalva', '#FF6B6B')
+        # Markers are in file-start time; shift to scan-relative
+        acq_start = loaded.get('acquisition_start') or 0.0
+        return [(t - acq_start, 15.0, 'Valsalva', color) for t in markers]
+    if task_key == 'gas':
+        variant = 'gas-short'
+        if participant_label:
+            pid = str(participant_label).replace('sub-', '').strip()
+            variant = config.GAS_VARIANT_MAP.get(pid, 'gas-short')
+        return config.load_onset_events(variant)
+    return config.load_onset_events(task_key)
 
 
 def add_task_event_lines(fig, task_name, max_time, session_label=None, participant_label=None):
-    """Add event boundary lines plus a readable top timeline legend."""
+    """Add event onset/offset lines plus a readable top timeline legend.
+
+    Events are (onset, duration, trial_type, color) tuples loaded from onset CSVs.
+    Draws a dashed line at onset and a dotted line at offset (onset + duration).
+    """
     task_key = _resolve_task_key(task_name)
     if task_key is None:
         return fig
@@ -1582,22 +1577,50 @@ def add_task_event_lines(fig, task_name, max_time, session_label=None, participa
         if str(session_label).strip().lower() not in session_a_aliases:
             return fig
     events = _resolve_task_events(task_key, participant_label=participant_label)
+
+    # Acquisition start/end in plot coordinates (time axis is already shifted
+    # so that t=0 = acquisition start).
+    loaded = st.session_state.get('loaded_data') or {}
+    acq_start_raw = loaded.get('acquisition_start')  # seconds from recording start
+    acq_end_raw = loaded.get('acquisition_end')
+
+    # Draw acquisition start (t=0) and end markers in shifted coordinates
+    acq_color = '#22D3EE'  # cyan
+    if acq_start_raw is not None and acq_start_raw > 0:
+        # Acquisition start is at t=0 after the shift (only draw if there's pre-scan data)
+        fig.add_vline(x=0.0, line_dash='solid', line_color=acq_color,
+                       line_width=1.5, opacity=0.6)
+    if acq_end_raw is not None:
+        acq_end_shifted = acq_end_raw - (acq_start_raw or 0.0)
+        if acq_end_shifted <= max_time:
+            fig.add_vline(x=acq_end_shifted, line_dash='solid', line_color=acq_color,
+                           line_width=1.5, opacity=0.6)
+
     if not events:
         return fig
 
+    # Events are already in scan-relative time (onset CSVs).  Since the
+    # plot time axis is now zeroed to acquisition start, events go directly
+    # at their CSV onset values — no offset needed.
     visible_events = []
-    for t, label, color in events:
-        if t > max_time:
+    for onset, duration, trial_type, color in events:
+        offset_end = onset + duration
+        if onset > max_time:
             continue
-        visible_events.append((t, label, color))
-        # Vertical line across all subplot rows
+        offset_end = min(offset_end, max_time)
+        visible_events.append((onset, offset_end, trial_type, color))
+        # Onset line (dashed)
         fig.add_vline(
-            x=t, line_dash='dash', line_color=color,
-            line_width=1, opacity=0.5,
+            x=onset, line_dash='dash', line_color=color,
+            line_width=2, opacity=0.7,
         )
+        # Offset line (dotted)
+        if offset_end <= max_time:
+            fig.add_vline(
+                x=offset_end, line_dash='dot', line_color=color,
+                line_width=2, opacity=0.5,
+            )
 
-    # Add readable labels near the top of the first subplot (inside plotting area)
-    # so they don't overlap subplot titles.
     if visible_events:
         sorted_events = sorted(visible_events, key=lambda e: e[0])
         min_sep_seconds = max(15.0, float(max_time) * 0.05) if max_time else 15.0
@@ -1607,26 +1630,26 @@ def add_task_event_lines(fig, task_name, max_time, session_label=None, participa
 
         edge_pad_seconds = max(20.0, float(max_time) * 0.03) if max_time else 20.0
 
-        for t, label, color in sorted_events:
-            if prev_t is None or (t - prev_t) >= min_sep_seconds:
+        for onset, offset, trial_type, color in sorted_events:
+            mid = (onset + offset) / 2.0
+            if prev_t is None or (onset - prev_t) >= min_sep_seconds:
                 row_idx = 0
             else:
                 row_idx = (row_idx + 1) % len(label_rows)
-            prev_t = t
+            prev_t = onset
 
-            # Keep edge labels fully visible (e.g., t=0 / last event).
             label_xanchor = 'center'
-            if t <= edge_pad_seconds:
+            if mid <= edge_pad_seconds:
                 label_xanchor = 'left'
-            elif max_time and t >= (max_time - edge_pad_seconds):
+            elif max_time and mid >= (max_time - edge_pad_seconds):
                 label_xanchor = 'right'
 
             fig.add_annotation(
-                x=t,
+                x=mid,
                 y=label_rows[row_idx],
                 xref='x',
                 yref='y domain',
-                text=f"<b>{label}</b>",
+                text=f"<b>{trial_type}</b>",
                 showarrow=False,
                 xanchor=label_xanchor,
                 yanchor='top',
@@ -1639,14 +1662,23 @@ def add_task_event_lines(fig, task_name, max_time, session_label=None, participa
                 col=1,
             )
 
-        # Build a single-line horizontal legend strip with larger font.
-        items = [
-            f"<span style='color:{color}'>●</span> {_format_event_time(t)} {label}"
-            for t, label, color in visible_events
-        ]
+        # Build legend strip
+        items = []
+        if acq_start_raw is not None:
+            trigger_count = loaded.get('trigger_count', 0)
+            acq_dur = (acq_end_raw or 0.0) - (acq_start_raw or 0.0)
+            items.append(
+                f"<span style='color:{acq_color}'>▮</span> "
+                f"Acq 0:00-{_format_event_time(acq_dur)} "
+                f"({trigger_count} vols)"
+            )
+        items.extend([
+            f"<span style='color:{color}'>●</span> "
+            f"{_format_event_time(onset)}-{_format_event_time(offset)} {trial_type}"
+            for onset, offset, trial_type, color in visible_events
+        ])
         legend_text = " | ".join(items)
 
-        # Increase top margin so the single-line timeline strip sits above subplot titles.
         current_margin_t = 0
         if fig.layout.margin and fig.layout.margin.t is not None:
             current_margin_t = int(fig.layout.margin.t)
@@ -1733,8 +1765,9 @@ def render_subject_metadata_tab(metadata):
         ("Gender", gender_display),
         ("Age", metadata.get('age') if metadata.get('age') is not None else 'N/A'),
         ("BMI", bmi_display),
-        ("ECG Configuration", metadata.get('ecg_configuration') or 'N/A'),
     ]
+    if is_session_a_selected(st.session_state.get('session', '')):
+        summary_fields.append(("ECG Configuration", metadata.get('ecg_configuration') or 'N/A'))
     summary_html = "".join(
         (
             "<div style='padding:0.35rem 0.45rem;'>"
@@ -1928,7 +1961,7 @@ def render_rsp_like_tab(data, sampling_rate, signal_key, state_prefix, header_ti
             n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
             st.metric("Added Exhalations", n_added_troughs)
 
-        time = np.arange(len(result['clean'])) / sampling_rate
+        time = np.arange(len(result['clean'])) / sampling_rate - _acq_time_offset()
 
         from metrics.rsp import calculate_breathing_rate
         if len(result['current_troughs']) > 1:
@@ -2983,7 +3016,7 @@ def main():
                 else:
                     selected_quality_metrics = []
 
-                time = np.arange(len(result['clean'])) / sampling_rate
+                time = np.arange(len(result['clean'])) / sampling_rate - _acq_time_offset()
 
                 # Recalculate HR based on current peaks
                 from metrics.ecg import calculate_hr
@@ -3272,7 +3305,7 @@ def main():
                     n_deleted = len(np.setdiff1d(result['auto_peaks'], result['current_peaks']))
                     st.metric("Deleted", n_deleted)
 
-                time = np.arange(len(result['clean'])) / sampling_rate
+                time = np.arange(len(result['clean'])) / sampling_rate - _acq_time_offset()
 
                 # Recalculate HR based on current peaks
                 from metrics.ppg import calculate_hr_from_ppg
@@ -3542,7 +3575,7 @@ def main():
                     n_added_troughs = len(np.setdiff1d(result['current_troughs'], result['auto_troughs']))
                     st.metric("Added Diastolic", n_added_troughs)
 
-                time = np.arange(len(result['filtered'])) / sampling_rate
+                time = np.arange(len(result['filtered'])) / sampling_rate - _acq_time_offset()
 
                 # --- 1. Calculate Aligned 4Hz BP Metrics & Derived HR ---
                 from metrics.blood_pressure import calculate_bp_metrics
@@ -3770,17 +3803,19 @@ def main():
     
                 # Create plotly figure
                 fig = make_subplots(
-                    rows=2, cols=1,
+                    rows=3, cols=1,
+                    shared_xaxes=True,
                     subplot_titles=(
                         'Raw End-Tidal CO2 Waveform with Peak Markers',
+                        'Raw vs SG-Filtered CO2 Waveform',
                         'ETCO2 Envelope (Breath-Wise Maxima)'
                     ),
-                    vertical_spacing=0.12,
-                    row_heights=[0.55, 0.45]
+                    vertical_spacing=0.08,
+                    row_heights=[0.4, 0.3, 0.3]
                 )
-    
-                time = result['time_vector']
-    
+
+                time = result['time_vector'] - _acq_time_offset()
+
                 # Row 1: Raw signal with peaks
                 fig.add_trace(
                     go.Scatter(
@@ -3792,7 +3827,7 @@ def main():
                     ),
                     row=1, col=1
                 )
-    
+
                 # Auto-detected peaks
                 if len(result['auto_peaks']) > 0:
                     fig.add_trace(
@@ -3805,7 +3840,7 @@ def main():
                         ),
                         row=1, col=1
                     )
-    
+
                 # Manually added peaks
                 added_peaks = np.setdiff1d(result['current_peaks'], result['auto_peaks'])
                 if len(added_peaks) > 0:
@@ -3819,7 +3854,7 @@ def main():
                         ),
                         row=1, col=1
                     )
-    
+
                 # Deleted peaks
                 deleted_peaks = np.setdiff1d(result['auto_peaks'], result['current_peaks'])
                 if len(deleted_peaks) > 0:
@@ -3833,8 +3868,31 @@ def main():
                         ),
                         row=1, col=1
                     )
-    
-                # Row 2: ETCO2 envelope
+
+                # Row 2: Raw vs SG-Filtered comparison
+                fig.add_trace(
+                    go.Scatter(
+                        x=time,
+                        y=result['raw_signal'],
+                        name='Raw CO2 (before)',
+                        line=dict(color='#636EFA', width=1),
+                        opacity=0.4,
+                        mode='lines'
+                    ),
+                    row=2, col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=time,
+                        y=result['sg_filtered_signal'],
+                        name='SG-Filtered CO2 (after)',
+                        line=dict(color='#FFA15A', width=2),
+                        mode='lines'
+                    ),
+                    row=2, col=1
+                )
+
+                # Row 3: ETCO2 envelope
                 fig.add_trace(
                     go.Scatter(
                         x=time,
@@ -3845,17 +3903,19 @@ def main():
                         fillcolor='rgba(239, 85, 59, 0.2)',
                         mode='lines'
                     ),
-                    row=2, col=1
+                    row=3, col=1
                 )
-    
+
                 # Layout
-                fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
-                fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
+                fig.update_xaxes(title_text="Time (s)", row=3, col=1)
+                fig.update_xaxes(showticklabels=True, row=1, col=1)
+                fig.update_xaxes(showticklabels=True, row=2, col=1)
                 fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_raw'], row=1, col=1)
-                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_envelope'], row=2, col=1)
+                fig.update_yaxes(title_text="CO2 (mmHg)", row=2, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['etco2_envelope'], row=3, col=1)
 
                 fig.update_layout(
-                    height=800,
+                    height=1000,
                     template='plotly_dark',
                     showlegend=True,
                     hovermode='x unified'
@@ -3883,18 +3943,18 @@ def main():
                     with col1:
                         region_start = st.number_input(
                             "Region Start (s)",
-                            min_value=0.0,
-                            max_value=float(result['time_vector'][-1]),
-                            value=0.0,
+                            min_value=float(time[0]),
+                            max_value=float(time[-1]),
+                            value=float(time[0]),
                             step=1.0,
                             key='etco2_region_start'
                         )
                     with col2:
                         region_end = st.number_input(
                             "Region End (s)",
-                            min_value=0.0,
-                            max_value=float(result['time_vector'][-1]),
-                            value=min(10.0, float(result['time_vector'][-1])),
+                            min_value=float(time[0]),
+                            max_value=float(time[-1]),
+                            value=min(float(time[0]) + 10.0, float(time[-1])),
                             step=1.0,
                             key='etco2_region_end'
                         )
@@ -4100,17 +4160,19 @@ def main():
     
                 # Create plotly figure
                 fig = make_subplots(
-                    rows=2, cols=1,
+                    rows=3, cols=1,
+                    shared_xaxes=True,
                     subplot_titles=(
                         'Raw End-Tidal O2 Waveform with Trough Markers',
+                        'Raw vs SG-Filtered O2 Waveform',
                         'ETO2 Envelope (Breath-Wise Minima)'
                     ),
-                    vertical_spacing=0.12,
-                    row_heights=[0.55, 0.45]
+                    vertical_spacing=0.08,
+                    row_heights=[0.4, 0.3, 0.3]
                 )
-    
-                time = result['time_vector']
-    
+
+                time = result['time_vector'] - _acq_time_offset()
+
                 # Row 1: Raw signal with troughs
                 fig.add_trace(
                     go.Scatter(
@@ -4122,7 +4184,7 @@ def main():
                     ),
                     row=1, col=1
                 )
-    
+
                 # Auto-detected troughs
                 if len(result['auto_troughs']) > 0:
                     fig.add_trace(
@@ -4135,7 +4197,7 @@ def main():
                         ),
                         row=1, col=1
                     )
-    
+
                 # Manually added troughs
                 added_troughs = np.setdiff1d(result['current_troughs'], result['auto_troughs'])
                 if len(added_troughs) > 0:
@@ -4149,7 +4211,7 @@ def main():
                         ),
                         row=1, col=1
                     )
-    
+
                 # Deleted troughs
                 deleted_troughs = np.setdiff1d(result['auto_troughs'], result['current_troughs'])
                 if len(deleted_troughs) > 0:
@@ -4163,8 +4225,31 @@ def main():
                         ),
                         row=1, col=1
                     )
-    
-                # Row 2: ETO2 envelope
+
+                # Row 2: Raw vs SG-Filtered comparison
+                fig.add_trace(
+                    go.Scatter(
+                        x=time,
+                        y=result['raw_signal'],
+                        name='Raw O2 (before)',
+                        line=dict(color='#FFA15A', width=1),
+                        opacity=0.4,
+                        mode='lines'
+                    ),
+                    row=2, col=1
+                )
+                fig.add_trace(
+                    go.Scatter(
+                        x=time,
+                        y=result['sg_filtered_signal'],
+                        name='SG-Filtered O2 (after)',
+                        line=dict(color='#636EFA', width=2),
+                        mode='lines'
+                    ),
+                    row=2, col=1
+                )
+
+                # Row 3: ETO2 envelope
                 fig.add_trace(
                     go.Scatter(
                         x=time,
@@ -4175,17 +4260,19 @@ def main():
                         fillcolor='rgba(25, 211, 243, 0.2)',
                         mode='lines'
                     ),
-                    row=2, col=1
+                    row=3, col=1
                 )
-    
+
                 # Layout
-                fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
-                fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
+                fig.update_xaxes(title_text="Time (s)", row=3, col=1)
+                fig.update_xaxes(showticklabels=True, row=1, col=1)
+                fig.update_xaxes(showticklabels=True, row=2, col=1)
                 fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_raw'], row=1, col=1)
-                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_envelope'], row=2, col=1)
+                fig.update_yaxes(title_text="O2 (mmHg)", row=2, col=1)
+                fig.update_yaxes(title_text=config.Y_AXIS_LABELS['eto2_envelope'], row=3, col=1)
 
                 fig.update_layout(
-                    height=800,
+                    height=1000,
                     template='plotly_dark',
                     showlegend=True,
                     hovermode='x unified'
@@ -4213,18 +4300,18 @@ def main():
                     with col1:
                         region_start = st.number_input(
                             "Region Start (s)",
-                            min_value=0.0,
-                            max_value=float(result['time_vector'][-1]),
-                            value=0.0,
+                            min_value=float(time[0]),
+                            max_value=float(time[-1]),
+                            value=float(time[0]),
                             step=1.0,
                             key='eto2_region_start'
                         )
                     with col2:
                         region_end = st.number_input(
                             "Region End (s)",
-                            min_value=0.0,
-                            max_value=float(result['time_vector'][-1]),
-                            value=min(10.0, float(result['time_vector'][-1])),
+                            min_value=float(time[0]),
+                            max_value=float(time[-1]),
+                            value=min(float(time[0]) + 10.0, float(time[-1])),
                             step=1.0,
                             key='eto2_region_end'
                         )
@@ -4440,6 +4527,7 @@ def main():
                 # Create plotly figure
                 fig = make_subplots(
                     rows=2, cols=1,
+                    shared_xaxes=True,
                     subplot_titles=(
                         'Raw vs Cleaned SpO2 Waveform',
                         'Cleaned SpO2 with Clinical Thresholds and Desaturation Events'
@@ -4448,7 +4536,7 @@ def main():
                     row_heights=[0.45, 0.55]
                 )
 
-                time = result['time_vector']
+                time = result['time_vector'] - _acq_time_offset()
 
                 # Row 1: Raw vs Cleaned
                 fig.add_trace(
@@ -4497,20 +4585,9 @@ def main():
                     annotation_text=f"{reference_line:.0f}%", row=2, col=1
                 )
 
-                # Highlight desaturation events
-                for event_start, event_end, min_val in result['desaturation_events']:
-                    fig.add_vrect(
-                        x0=time[event_start],
-                        x1=time[min(event_end, len(time)-1)],
-                        fillcolor="rgba(255, 0, 0, 0.2)",
-                        layer="below",
-                        line_width=0,
-                        row=2, col=1
-                    )
-
                 # Layout
-                fig.update_xaxes(title_text="Time (s)", row=2, col=1, rangemode='nonnegative')
-                fig.update_xaxes(rangemode='nonnegative', row=1, col=1)
+                fig.update_xaxes(title_text="Time (s)", row=2, col=1)
+                fig.update_xaxes(showticklabels=True, row=1, col=1)
                 fig.update_yaxes(title_text=config.Y_AXIS_LABELS['spo2_raw'], row=1, col=1)
                 # Dynamic SpO2 axis limits to avoid hard-coded lower bounds.
                 spo2_clean = np.asarray(result['cleaned_signal'], dtype=float)
@@ -4557,18 +4634,18 @@ def main():
                     with col1:
                         region_start = st.number_input(
                             "Region Start (s)",
-                            min_value=0.0,
-                            max_value=float(result['time_vector'][-1]),
-                            value=0.0,
+                            min_value=float(time[0]),
+                            max_value=float(time[-1]),
+                            value=float(time[0]),
                             step=1.0,
                             key='spo2_region_start'
                         )
                     with col2:
                         region_end = st.number_input(
                             "Region End (s)",
-                            min_value=0.0,
-                            max_value=float(result['time_vector'][-1]),
-                            value=min(60.0, float(result['time_vector'][-1])),
+                            min_value=float(time[0]),
+                            max_value=float(time[-1]),
+                            value=min(float(time[0]) + 60.0, float(time[-1])),
                             step=1.0,
                             key='spo2_region_end'
                         )
@@ -4686,7 +4763,7 @@ def main():
                     st.metric("Added Troughs", n_added_troughs)
 
                 # Time Array
-                time = np.arange(len(result['filtered'])) / sampling_rate
+                time = np.arange(len(result['filtered'])) / sampling_rate - _acq_time_offset()
 
                 # Calculate Aligned Metrics & HR
                 from metrics.doppler import calculate_doppler_metrics, extract_template_and_score
@@ -4718,11 +4795,13 @@ def main():
                     step_sec=5.0,
                     quality_threshold=0.8,
                 )
-                t_4hz = doppler_data_4hz.get('time_4hz', np.array([]))
-                noisy_mask_4hz = np.zeros(len(t_4hz), dtype=bool)
-                if len(t_4hz) > 0 and len(noisy_windows) > 0:
+                t_4hz_raw = doppler_data_4hz.get('time_4hz', np.array([]))
+                noisy_mask_4hz = np.zeros(len(t_4hz_raw), dtype=bool)
+                if len(t_4hz_raw) > 0 and len(noisy_windows) > 0:
                     for w_start, w_end in noisy_windows:
-                        noisy_mask_4hz |= (t_4hz >= w_start) & (t_4hz <= w_end)
+                        noisy_mask_4hz |= (t_4hz_raw >= w_start) & (t_4hz_raw <= w_end)
+                # Shift to acquisition-referenced time for plotting
+                t_4hz = t_4hz_raw - _acq_time_offset()
 
                 # Zoom constraints
                 if 'doppler_region_start' not in st.session_state:
@@ -4740,7 +4819,7 @@ def main():
                     bp_data=doppler_data_4hz,
                     hr_data=hr_from_doppler,
                     beat_quality_scores=current_beat_scores,
-                    noisy_windows=noisy_windows,
+                    noisy_windows=[(w0 - _acq_time_offset(), w1 - _acq_time_offset()) for w0, w1 in noisy_windows],
                     noisy_mask_4hz=noisy_mask_4hz,
                     ui_revision='doppler_plot',
                     zoom_range=doppler_zoom

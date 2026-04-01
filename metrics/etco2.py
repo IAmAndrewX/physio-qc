@@ -266,6 +266,14 @@ def extract_etco2_envelope(signal: np.ndarray, sampling_rate: float, params: Opt
         peak_values = np.array([])
         smoothed_peak_values = np.array([])
 
+    # Compute SG-filtered signal for visualization (before/after comparison)
+    win_pts = max(5, int(round(sg_window_s * sampling_rate)))
+    win_pts = _nearest_odd(win_pts)
+    try:
+        sg_filtered_signal = savgol_filter(signal, window_length=win_pts, polyorder=max(1, sg_poly))
+    except ValueError:
+        sg_filtered_signal = signal.copy()
+
     # Create envelope by interpolation
     if peaks_idx.size >= 2:
         envelope = np.interp(time_vector, time_vector[peaks_idx], smoothed_peak_values)
@@ -282,6 +290,7 @@ def extract_etco2_envelope(signal: np.ndarray, sampling_rate: float, params: Opt
 
     result = {
         "raw_signal": signal,
+        "sg_filtered_signal": sg_filtered_signal,
         "auto_peaks": peaks_idx.copy(),
         "current_peaks": peaks_idx.copy(),
         "etco2_envelope": envelope,

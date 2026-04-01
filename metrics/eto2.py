@@ -269,6 +269,14 @@ def extract_eto2_envelope(signal: np.ndarray, sampling_rate: float, params: Opti
         trough_values = np.array([])
         smoothed_trough_values = np.array([])
 
+    # Compute SG-filtered signal for visualization (before/after comparison)
+    win_pts = max(5, int(round(sg_window_s * sampling_rate)))
+    win_pts = _nearest_odd(win_pts)
+    try:
+        sg_filtered_signal = savgol_filter(signal, window_length=win_pts, polyorder=max(1, sg_poly))
+    except ValueError:
+        sg_filtered_signal = signal.copy()
+
     # Create envelope by interpolation
     if troughs_idx.size >= 2:
         envelope = np.interp(time_vector, time_vector[troughs_idx], smoothed_trough_values)
@@ -285,6 +293,7 @@ def extract_eto2_envelope(signal: np.ndarray, sampling_rate: float, params: Opti
 
     result = {
         "raw_signal": signal,
+        "sg_filtered_signal": sg_filtered_signal,
         "auto_troughs": troughs_idx.copy(),
         "current_troughs": troughs_idx.copy(),
         "eto2_envelope": envelope,

@@ -423,6 +423,18 @@ DEFAULT_SPO2_PARAMS = {
     'min_event_duration_s': 10.0  # minimum duration for desaturation event
 }
 
+DEFAULT_SPIR_PARAMS = {
+    'data_type': 'humanAirflow',
+    'zscore': 0,
+    'baseline_method': 'sliding',
+    'simplify': 1,
+    'verbose': 0,
+    'exclude_outliers': 0,
+    'volume_outlier_sd': 3.0,
+    'exclude_duration_outliers': 0,
+    'duration_outlier_sd': 3.0,
+}
+
 # =============================================================================
 # TASK EVENT PROTOCOLS (vertical line annotations on plots)
 # =============================================================================

@@ -7,7 +7,7 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 
-def _add_volume_stats(bm_attr, key_prefix, result, bm, exclude_outliers, volume_outlier_sd=2.0):
+def _add_volume_stats(bm_attr, key_prefix, result, bm, exclude_outliers, volume_outlier_sd=3.0):
     """
     Extract volume stats from a BreathMetrics attribute and store in result.
 
@@ -227,6 +227,19 @@ def process_breathmetrics(signal, sampling_rate, params):
                         breath_times[:min_len], minute_ventilation_values,
                         kind='linear', bounds_error=False, fill_value=np.nan
                     )(bm.time)
+
+                    valid_mv_mask = np.isfinite(minute_ventilation_values)
+                    if exclude_outliers and 'tidal_outliers' in result:
+                        tidal_out = result['tidal_outliers']
+                        n = min(min_len, len(tidal_out))
+                        valid_mv_mask[:n] &= ~tidal_out[:n]
+                    if exclude_duration_outliers and 'duration_outliers' in result:
+                        dur_out = result['duration_outliers']
+                        n = min(min_len, len(dur_out))
+                        valid_mv_mask[:n] &= ~dur_out[:n]
+                    valid_mv_inds = np.where(valid_mv_mask)[0]
+                    if len(valid_mv_inds) > 0:
+                        result['mean_minute_ventilation'] = float(np.mean(minute_ventilation_values[valid_mv_inds]))
 
         return result
 

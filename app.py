@@ -5107,11 +5107,8 @@ def main():
                     else:
                         st.metric("Mean Tidal Volume", "N/A")
                 with col6:
-                    if 'minute_ventilation_values' in result:
-                        mv_vals = result['minute_ventilation_values']
-                        valid = outlier_valid_mask(len(mv_vals), np.isnan(mv_vals))
-                        mean_mv = np.mean(mv_vals[valid]) if np.any(valid) else np.nan
-                        st.metric("Mean Minute Ventilation", f"{mean_mv/1000:.2f} L/min" if not np.isnan(mean_mv) else "N/A")
+                    if 'mean_minute_ventilation' in result:
+                        st.metric("Mean Minute Ventilation", f"{result['mean_minute_ventilation']/1000:.2f} L/min")
                     else:
                         st.metric("Mean Minute Ventilation", "N/A")
 

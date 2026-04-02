@@ -5243,12 +5243,12 @@ def main():
                 fig.update_yaxes(title_text="Airflow (mL/s)", row=2, col=1)
 
                 # Row 3: Instantaneous Breathing Rate
-                if 'breath_times' in result and 'rate_values' in result:
-                    n_rates = len(result['rate_values'])
-                    valid = outlier_valid_mask(n_rates, np.isnan(result['rate_values']))
+                if 'breath_times' in result and 'rate_values_clean' in result:
+                    rate_clean = result['rate_values_clean']
+                    valid = np.isfinite(rate_clean)
                     if np.any(valid):
                         fig.add_trace(
-                            go.Scatter(x=result['breath_times'][valid], y=result['rate_values'][valid],
+                            go.Scatter(x=result['breath_times'][valid], y=rate_clean[valid],
                                      mode='lines+markers', name='Breathing Rate',
                                      line=dict(color='#A78BFA', width=2),
                                      marker=dict(color='#A78BFA', size=6)),
@@ -5257,30 +5257,32 @@ def main():
                         fig.update_yaxes(title_text="Rate (Breaths/minute)", row=3, col=1)
 
                 # Row 4: Tidal Volume over time
-                if 'tidal_volumes' in result and len(result['tidal_volumes']) > 0 and len(result['current_troughs']) > 0:
-                    n_to_plot = min(len(result['tidal_volumes']), len(result['current_troughs']))
-                    tidal_times = time[result['current_troughs'][:n_to_plot]]
-                    tidal_values = result['tidal_volumes'][:n_to_plot]
-                    valid_mask = outlier_valid_mask(n_to_plot, np.isnan(tidal_values))
+                if 'tidal_volumes_clean' in result and 'breath_times' in result:
+                    tv_clean = result['tidal_volumes_clean']
+                    bt = result['breath_times']
+                    n_to_plot = min(len(tv_clean), len(bt))
+                    valid_mask = np.isfinite(tv_clean[:n_to_plot])
                     if np.any(valid_mask):
                         fig.add_trace(
-                            go.Scatter(x=tidal_times[valid_mask], y=tidal_values[valid_mask], mode='lines+markers',
-                                     name='Tidal Volume', line=dict(color='#FFA500', width=2),
+                            go.Scatter(x=bt[:n_to_plot][valid_mask], y=tv_clean[:n_to_plot][valid_mask],
+                                     mode='lines+markers', name='Tidal Volume',
+                                     line=dict(color='#FFA500', width=2),
                                      marker=dict(color='#FFA500', size=6)),
                             row=4, col=1
                         )
                         fig.update_yaxes(title_text="Volume (mL)", row=4, col=1)
 
                 # Row 5: Minute Ventilation over time
-                if 'minute_ventilation_values' in result and 'breath_times' in result:
-                    n_mv = len(result['minute_ventilation_values'])
-                    mv_times = result['breath_times'][:n_mv]
-                    mv_values = result['minute_ventilation_values']
-                    valid_mask = outlier_valid_mask(n_mv, np.isnan(mv_values))
+                if 'minute_ventilation_values_clean' in result and 'breath_times' in result:
+                    mv_clean = result['minute_ventilation_values_clean']
+                    bt = result['breath_times']
+                    n_mv = min(len(mv_clean), len(bt))
+                    valid_mask = np.isfinite(mv_clean[:n_mv])
                     if np.any(valid_mask):
                         fig.add_trace(
-                            go.Scatter(x=mv_times[valid_mask], y=mv_values[valid_mask], mode='lines+markers',
-                                     name='Minute Ventilation', line=dict(color='purple', width=2),
+                            go.Scatter(x=bt[:n_mv][valid_mask], y=mv_clean[:n_mv][valid_mask],
+                                     mode='lines+markers', name='Minute Ventilation',
+                                     line=dict(color='purple', width=2),
                                      marker=dict(color='purple', size=6)),
                             row=5, col=1
                         )

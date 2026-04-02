@@ -29,11 +29,12 @@ def _add_volume_stats(bm_attr, key_prefix, result, bm, exclude_outliers, volume_
     if exclude_outliers:
         mean_val = np.nanmean(cycle_vols[valid_inds])
         std_val = np.nanstd(cycle_vols[valid_inds])
-        outlier_mask = (
-            (cycle_vols < mean_val - volume_outlier_sd * std_val) |
-            (cycle_vols > mean_val + volume_outlier_sd * std_val)
-        )
-        result[f'{key_prefix}_outliers'] = outlier_mask
+        outlier_mask_low  = cycle_vols < mean_val - volume_outlier_sd * std_val
+        outlier_mask_high = cycle_vols > mean_val + volume_outlier_sd * std_val
+        outlier_mask = outlier_mask_low | outlier_mask_high
+        result[f'{key_prefix}_outliers']      = outlier_mask
+        result[f'{key_prefix}_outliers_low']  = outlier_mask_low
+        result[f'{key_prefix}_outliers_high'] = outlier_mask_high
         valid_non_outlier_inds = np.where(~np.isnan(cycle_vols) & ~outlier_mask)[0]
         result[f'mean_{key_prefix}_volume'] = float(
             np.mean(cycle_vols[valid_non_outlier_inds]) if len(valid_non_outlier_inds) > 0
@@ -162,9 +163,17 @@ def process_breathmetrics(signal, sampling_rate, params):
 
             if 'inhale_outliers' in result and 'exhale_outliers' in result:
                 tidal_outliers = result['inhale_outliers'][:min_len] | result['exhale_outliers'][:min_len]
+                tidal_outliers_low  = result.get('inhale_outliers_low',  np.zeros(min_len, dtype=bool))[:min_len] \
+                                    | result.get('exhale_outliers_low',  np.zeros(min_len, dtype=bool))[:min_len]
+                tidal_outliers_high = result.get('inhale_outliers_high', np.zeros(min_len, dtype=bool))[:min_len] \
+                                    | result.get('exhale_outliers_high', np.zeros(min_len, dtype=bool))[:min_len]
             else:
-                tidal_outliers = np.zeros(min_len, dtype=bool)
-            result['tidal_outliers'] = tidal_outliers
+                tidal_outliers      = np.zeros(min_len, dtype=bool)
+                tidal_outliers_low  = np.zeros(min_len, dtype=bool)
+                tidal_outliers_high = np.zeros(min_len, dtype=bool)
+            result['tidal_outliers']      = tidal_outliers
+            result['tidal_outliers_low']  = tidal_outliers_low
+            result['tidal_outliers_high'] = tidal_outliers_high
 
             # valid_tidal_inds already excludes NaNs and outlier cycles (via tidal_outliers,
             # which is the union of inhale/exhale outlier flags set by _add_volume_stats).
@@ -215,6 +224,18 @@ def process_breathmetrics(signal, sampling_rate, params):
                 rates = 60.0 / intervals
                 result['breath_times'] = breath_times
                 result['rate_values'] = rates
+
+                # Build outlier mask for rate (duration-based only)
+                n_rates = len(rates)
+                rate_outlier_mask = np.zeros(n_rates, dtype=bool)
+                if exclude_duration_outliers and 'duration_outliers' in result:
+                    dur_out = result['duration_outliers']
+                    n = min(n_rates, len(dur_out))
+                    rate_outlier_mask[:n] = dur_out[:n]
+
+                rates_clean = rates.copy().astype(float)
+                rates_clean[rate_outlier_mask] = np.nan
+                result['rate_values_clean'] = rates_clean
                 result['rate_interpolated'] = interp1d(
                     breath_times, rates, kind='linear', bounds_error=False, fill_value=np.nan
                 )(bm.time)
@@ -228,6 +249,7 @@ def process_breathmetrics(signal, sampling_rate, params):
                         kind='linear', bounds_error=False, fill_value=np.nan
                     )(bm.time)
 
+                    # Build combined outlier mask for tidal volumes + duration
                     valid_mv_mask = np.isfinite(minute_ventilation_values)
                     if exclude_outliers and 'tidal_outliers' in result:
                         tidal_out = result['tidal_outliers']
@@ -237,6 +259,16 @@ def process_breathmetrics(signal, sampling_rate, params):
                         dur_out = result['duration_outliers']
                         n = min(min_len, len(dur_out))
                         valid_mv_mask[:n] &= ~dur_out[:n]
+
+                        # Clean per-cycle arrays with NaN in place of outliers
+                    tv_clean = result['tidal_volumes'][:min_len].copy().astype(float)
+                    tv_clean[~valid_mv_mask] = np.nan
+                    result['tidal_volumes_clean'] = tv_clean
+
+                    mv_clean = minute_ventilation_values.copy().astype(float)
+                    mv_clean[~valid_mv_mask] = np.nan
+                    result['minute_ventilation_values_clean'] = mv_clean
+
                     valid_mv_inds = np.where(valid_mv_mask)[0]
                     if len(valid_mv_inds) > 0:
                         result['mean_minute_ventilation'] = float(np.mean(minute_ventilation_values[valid_mv_inds]))

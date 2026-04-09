@@ -42,6 +42,7 @@ docs/_build/
 exported/
 outputs/
 .streamlit/*.log
+static/nifti/
 
 # Backup and patch leftovers
 *.backup

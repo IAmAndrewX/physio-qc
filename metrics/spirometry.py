@@ -7,42 +7,104 @@ import numpy as np
 from scipy.interpolate import interp1d
 
 
-def _add_volume_stats(bm_attr, key_prefix, result, bm, exclude_outliers, volume_outlier_sd=3.0):
+def _get_flow_values(bm, flow_attr, indices):
+    """Return pre-computed flow values if available, else sample the signal at indices."""
+    flows = getattr(bm, flow_attr, None)
+    if flows is not None and len(flows) > 0:
+        return flows
+    if len(indices) > 0:
+        return bm.smoothedRespiration[indices]
+    return np.array([])
+
+
+def _build_outlier_mask(length, *components):
+    """OR together boolean mask components into a mask of the given length.
+
+    None entries are skipped. Components shorter than `length` are treated as
+    False beyond their end (length mismatches are common because rate arrays
+    have one entry per breath interval while volume arrays have one per cycle).
+    """
+    combined = np.zeros(length, dtype=bool)
+    for comp in components:
+        if comp is None:
+            continue
+        n = min(length, len(comp))
+        combined[:n] |= np.asarray(comp[:n], dtype=bool)
+    return combined
+
+
+def _blank_invalid(array, invalid_mask):
+    """Return a float copy of `array` with `invalid_mask` positions replaced by NaN."""
+    clean = np.asarray(array, dtype=float).copy()
+    clean[invalid_mask] = np.nan
+    return clean
+
+
+def _sd_outliers(values, n_sd):
+    """Return (low_mask, high_mask) for values beyond n_sd SD from the mean.
+
+    NaN/Inf are treated as non-outliers. Returns all-False masks if <2 finite values.
+    """
+    values = np.asarray(values, dtype=float)
+    valid = np.isfinite(values)
+    if valid.sum() < 2:
+        return np.zeros(len(values), dtype=bool), np.zeros(len(values), dtype=bool)
+    mean = np.nanmean(values[valid])
+    std  = np.nanstd(values[valid])
+    return values < mean - n_sd * std, values > mean + n_sd * std
+
+
+def _add_volume_stats(bm_attr, key_prefix, result, bm, exclude_outliers, volume_outlier_sd=3.0, flow_attr=None):
     """
     Extract volume stats from a BreathMetrics attribute and store in result.
 
     BreathMetrics stores volume arrays as shape (1, n) — we index [0] to get
     the flat 1-D array of per-cycle values.
+
+    If flow_attr is provided, peak flow outliers are OR'd into the volume outlier mask.
+    Absolute values are used for flow comparison since expiratory troughs are negative.
     """
-    if not (hasattr(bm, bm_attr) and getattr(bm, bm_attr) is not None
-            and len(getattr(bm, bm_attr)) > 0):
+    vols = getattr(bm, bm_attr, None)
+    if vols is None or len(vols) == 0:
         return
 
-    vols = getattr(bm, bm_attr)
     cycle_vols = vols[0]  # BreathMetrics stores volumes as (1, n); grab the inner array
     result[f'{key_prefix}_volumes'] = cycle_vols.flatten()
 
-    valid_inds = np.where(~np.isnan(cycle_vols))[0]
-    if len(valid_inds) == 0:
+    valid = np.isfinite(cycle_vols)
+    if not valid.any():
         return
 
-    if exclude_outliers:
-        mean_val = np.nanmean(cycle_vols[valid_inds])
-        std_val = np.nanstd(cycle_vols[valid_inds])
-        outlier_mask_low  = cycle_vols < mean_val - volume_outlier_sd * std_val
-        outlier_mask_high = cycle_vols > mean_val + volume_outlier_sd * std_val
-        outlier_mask = outlier_mask_low | outlier_mask_high
-        result[f'{key_prefix}_outliers']      = outlier_mask
-        result[f'{key_prefix}_outliers_low']  = outlier_mask_low
-        result[f'{key_prefix}_outliers_high'] = outlier_mask_high
-        valid_non_outlier_inds = np.where(~np.isnan(cycle_vols) & ~outlier_mask)[0]
-        result[f'mean_{key_prefix}_volume'] = float(
-            np.mean(cycle_vols[valid_non_outlier_inds]) if len(valid_non_outlier_inds) > 0
-            else np.mean(cycle_vols[valid_inds])
-        )
-    else:
+    if not exclude_outliers:
         result[f'{key_prefix}_outliers'] = np.zeros(len(cycle_vols), dtype=bool)
-        result[f'mean_{key_prefix}_volume'] = float(np.mean(cycle_vols[valid_inds]))
+        result[f'mean_{key_prefix}_volume'] = float(np.mean(cycle_vols[valid]))
+        return
+
+    # Volume-based outliers
+    vol_low, vol_high = _sd_outliers(cycle_vols, volume_outlier_sd)
+
+    # Flow-based outliers, aligned to cycle_vols length (pad with NaN beyond known flows)
+    flow_low  = np.zeros(len(cycle_vols), dtype=bool)
+    flow_high = np.zeros(len(cycle_vols), dtype=bool)
+    if flow_attr is not None and hasattr(bm, flow_attr):
+        flows_raw = np.abs(np.array(getattr(bm, flow_attr), dtype=float))
+        flows_aligned = np.full(len(cycle_vols), np.nan)
+        n = min(len(flows_raw), len(cycle_vols))
+        flows_aligned[:n] = flows_raw[:n]
+        flow_low, flow_high = _sd_outliers(flows_aligned, volume_outlier_sd)
+
+    outlier_mask_low  = vol_low  | flow_low
+    outlier_mask_high = vol_high | flow_high
+    outlier_mask      = outlier_mask_low | outlier_mask_high
+
+    result[f'{key_prefix}_outliers']      = outlier_mask
+    result[f'{key_prefix}_outliers_low']  = outlier_mask_low
+    result[f'{key_prefix}_outliers_high'] = outlier_mask_high
+
+    non_outlier = valid & ~outlier_mask
+    result[f'mean_{key_prefix}_volume'] = float(
+        np.mean(cycle_vols[non_outlier]) if non_outlier.any() else np.mean(cycle_vols[valid])
+    )
 
 
 def process_breathmetrics(signal, sampling_rate, params):
@@ -113,18 +175,8 @@ def process_breathmetrics(signal, sampling_rate, params):
         if data_type in ['humanAirflow', 'rodentAirflow']:
             current_peaks = bm.inhalePeaks
             current_troughs = bm.exhaleTroughs
-            if hasattr(bm, 'peakInspiratoryFlows') and len(bm.peakInspiratoryFlows) > 0:
-                peaks_values = bm.peakInspiratoryFlows
-            elif len(bm.inhalePeaks) > 0:
-                peaks_values = bm.smoothedRespiration[bm.inhalePeaks]
-            else:
-                peaks_values = np.array([])
-            if hasattr(bm, 'troughExpiratoryFlows') and len(bm.troughExpiratoryFlows) > 0:
-                troughs_values = bm.troughExpiratoryFlows
-            elif len(bm.exhaleTroughs) > 0:
-                troughs_values = bm.smoothedRespiration[bm.exhaleTroughs]
-            else:
-                troughs_values = np.array([])
+            peaks_values   = _get_flow_values(bm, 'peakInspiratoryFlows',  bm.inhalePeaks)
+            troughs_values = _get_flow_values(bm, 'troughExpiratoryFlows', bm.exhaleTroughs)
         else:  # In case we want to try using breathmetrics on belt data, though this isn't supported in the app
             current_peaks = bm.exhaleOnsets if hasattr(bm, 'exhaleOnsets') else bm.inhaleOnsets
             current_troughs = bm.inhaleOnsets if hasattr(bm, 'inhaleOnsets') else bm.exhaleOnsets
@@ -149,49 +201,53 @@ def process_breathmetrics(signal, sampling_rate, params):
             'params': params.copy(),
         }
 
-        _add_volume_stats('inhaleVolumes', 'inhale', result, bm, exclude_outliers, volume_outlier_sd)
-        _add_volume_stats('exhaleVolumes', 'exhale', result, bm, exclude_outliers, volume_outlier_sd)
+        _add_volume_stats('inhaleVolumes', 'inhale', result, bm, exclude_outliers, volume_outlier_sd,
+                          flow_attr='peakInspiratoryFlows')
+        _add_volume_stats('exhaleVolumes', 'exhale', result, bm, exclude_outliers, volume_outlier_sd,
+                          flow_attr='troughExpiratoryFlows')
 
-        # Tidal volumes (inhale + exhale)
-        # Calculated in BreathMetrics by adding abs(values) for all values within one breath, then dividing by the sampling rate 
+        # Tidal volumes (inhale + exhale per cycle, matching BreathMetrics' convention).
+        # Each constituent volume is computed in BreathMetrics by integrating
+        # abs(baseline-corrected signal) over the inhale or exhale phase, then
+        # dividing by the sampling rate.
+        #
+        # Note: mean_inhale_volume and mean_exhale_volume are set by _add_volume_stats
+        # using independent per-side denominators, so mean_tidal_volume below is *not*
+        # algebraically equal to mean_inhale + mean_exhale. Callers that need the three
+        # means to be internally consistent (e.g. so manual cycle removal can update
+        # them in lock-step) should recompute all three from the per-cycle arrays using
+        # a single shared mask.
         if 'inhale_volumes' in result and 'exhale_volumes' in result:
             inhale_vols = np.array(result['inhale_volumes']).flatten()
             exhale_vols = np.array(result['exhale_volumes']).flatten()
             min_len = min(len(inhale_vols), len(exhale_vols))
-            tidal_volumes = inhale_vols[:min_len] + exhale_vols[:min_len]
+            # Tidal volume per cycle = average of inhale and exhale volumes (≈ one-way air
+            # displaced per breath). BreathMetrics' convention is the *sum*, which is 2× the
+            # textbook V_T and inflates downstream minute ventilation by the same factor;
+            # we deliberately diverge here.
+            tidal_volumes = (inhale_vols[:min_len] + exhale_vols[:min_len]) / 2.0
             result['tidal_volumes'] = tidal_volumes
 
-            if 'inhale_outliers' in result and 'exhale_outliers' in result:
-                tidal_outliers = result['inhale_outliers'][:min_len] | result['exhale_outliers'][:min_len]
-                tidal_outliers_low  = result.get('inhale_outliers_low',  np.zeros(min_len, dtype=bool))[:min_len] \
-                                    | result.get('exhale_outliers_low',  np.zeros(min_len, dtype=bool))[:min_len]
-                tidal_outliers_high = result.get('inhale_outliers_high', np.zeros(min_len, dtype=bool))[:min_len] \
-                                    | result.get('exhale_outliers_high', np.zeros(min_len, dtype=bool))[:min_len]
-            else:
-                tidal_outliers      = np.zeros(min_len, dtype=bool)
-                tidal_outliers_low  = np.zeros(min_len, dtype=bool)
-                tidal_outliers_high = np.zeros(min_len, dtype=bool)
+            # Merge inhale/exhale outlier masks into tidal-level masks
+            tidal_outliers      = _build_outlier_mask(min_len, result.get('inhale_outliers'),      result.get('exhale_outliers'))
+            tidal_outliers_low  = _build_outlier_mask(min_len, result.get('inhale_outliers_low'),  result.get('exhale_outliers_low'))
+            tidal_outliers_high = _build_outlier_mask(min_len, result.get('inhale_outliers_high'), result.get('exhale_outliers_high'))
             result['tidal_outliers']      = tidal_outliers
             result['tidal_outliers_low']  = tidal_outliers_low
             result['tidal_outliers_high'] = tidal_outliers_high
 
-            # valid_tidal_inds already excludes NaNs and outlier cycles (via tidal_outliers,
-            # which is the union of inhale/exhale outlier flags set by _add_volume_stats).
-            # No second filtering pass needed — just mean the remaining cycles directly.
-            valid_tidal_inds = np.where(~np.isnan(tidal_volumes) & ~tidal_outliers)[0]
-            if len(valid_tidal_inds) > 0:
-                result['mean_tidal_volume'] = float(np.mean(tidal_volumes[valid_tidal_inds]))
+            valid_tidal = np.isfinite(tidal_volumes) & ~tidal_outliers
+            if valid_tidal.any():
+                result['mean_tidal_volume'] = float(np.mean(tidal_volumes[valid_tidal]))
 
-        if hasattr(bm, 'inhaleDurations') and bm.inhaleDurations is not None and len(bm.inhaleDurations) > 0:
-            result['inhale_durations'] = np.array(bm.inhaleDurations).flatten()
-            valid = bm.inhaleDurations[0][~np.isnan(bm.inhaleDurations[0])]
+        for bm_attr, key_prefix in [('inhaleDurations', 'inhale'), ('exhaleDurations', 'exhale')]:
+            durations = getattr(bm, bm_attr, None)
+            if durations is None or len(durations) == 0:
+                continue
+            result[f'{key_prefix}_durations'] = np.array(durations).flatten()
+            valid = durations[0][~np.isnan(durations[0])]
             if len(valid) > 0:
-                result['mean_inhale_duration'] = float(np.mean(valid))
-        if hasattr(bm, 'exhaleDurations') and bm.exhaleDurations is not None and len(bm.exhaleDurations) > 0:
-            result['exhale_durations'] = np.array(bm.exhaleDurations).flatten()
-            valid = bm.exhaleDurations[0][~np.isnan(bm.exhaleDurations[0])]
-            if len(valid) > 0:
-                result['mean_exhale_duration'] = float(np.mean(valid))
+                result[f'mean_{key_prefix}_duration'] = float(np.mean(valid))
 
         # Breathing rate — prefer inhale onsets for flow signals, fall back to troughs
         if hasattr(bm, 'inhaleOnsets') and bm.inhaleOnsets is not None and len(bm.inhaleOnsets) > 1:
@@ -207,12 +263,8 @@ def process_breathmetrics(signal, sampling_rate, params):
             intervals = np.diff(marker_times)
             if len(intervals) > 0:
                 # Compute duration outlier mask first so it can gate the mean interval
-                interval_mean = np.mean(intervals)
-                interval_std = np.std(intervals)
-                duration_outlier_mask = (
-                    (intervals < interval_mean - duration_outlier_sd * interval_std) |
-                    (intervals > interval_mean + duration_outlier_sd * interval_std)
-                )
+                dur_low, dur_high = _sd_outliers(intervals, duration_outlier_sd)
+                duration_outlier_mask = dur_low | dur_high
                 result['duration_outliers'] = duration_outlier_mask
 
                 valid_intervals = intervals[~duration_outlier_mask] if exclude_duration_outliers else intervals
@@ -225,53 +277,63 @@ def process_breathmetrics(signal, sampling_rate, params):
                 result['breath_times'] = breath_times
                 result['rate_values'] = rates
 
-                # Build outlier mask for rate (duration-based only)
-                n_rates = len(rates)
-                rate_outlier_mask = np.zeros(n_rates, dtype=bool)
-                if exclude_duration_outliers and 'duration_outliers' in result:
-                    dur_out = result['duration_outliers']
-                    n = min(n_rates, len(dur_out))
-                    rate_outlier_mask[:n] = dur_out[:n]
-
-                rates_clean = rates.copy().astype(float)
-                rates_clean[rate_outlier_mask] = np.nan
-                result['rate_values_clean'] = rates_clean
+                # Build outlier mask for rate, honoring both volume and duration exclusions
+                # so the breathing-rate plot stays consistent with tidal_volumes_clean and
+                # minute_ventilation_values_clean below.
+                rate_outlier_mask = _build_outlier_mask(
+                    len(rates),
+                    result.get('tidal_outliers')    if exclude_outliers          else None,
+                    result.get('duration_outliers') if exclude_duration_outliers else None,
+                )
+                result['rate_values_clean'] = _blank_invalid(rates, rate_outlier_mask)
                 result['rate_interpolated'] = interp1d(
                     breath_times, rates, kind='linear', bounds_error=False, fill_value=np.nan
                 )(bm.time)
 
                 if 'tidal_volumes' in result:
                     min_len = min(len(result['tidal_volumes']), len(rates))
-                    minute_ventilation_values = result['tidal_volumes'][:min_len] * rates[:min_len]
+                    # Minute ventilation in L/min: tidal_volume (mL) * rate (per min) / 1000
+                    minute_ventilation_values = result['tidal_volumes'][:min_len] * rates[:min_len] / 1000.0
                     result['minute_ventilation_values'] = minute_ventilation_values
                     result['minute_ventilation_interpolated'] = interp1d(
                         breath_times[:min_len], minute_ventilation_values,
                         kind='linear', bounds_error=False, fill_value=np.nan
                     )(bm.time)
 
-                    # Build combined outlier mask for tidal volumes + duration
-                    valid_mv_mask = np.isfinite(minute_ventilation_values)
-                    if exclude_outliers and 'tidal_outliers' in result:
-                        tidal_out = result['tidal_outliers']
-                        n = min(min_len, len(tidal_out))
-                        valid_mv_mask[:n] &= ~tidal_out[:n]
-                    if exclude_duration_outliers and 'duration_outliers' in result:
-                        dur_out = result['duration_outliers']
-                        n = min(min_len, len(dur_out))
-                        valid_mv_mask[:n] &= ~dur_out[:n]
+                    # Combined invalid-cycle mask: non-finite MV OR any active outlier source
+                    invalid_cycles = _build_outlier_mask(
+                        min_len,
+                        result.get('tidal_outliers')    if exclude_outliers          else None,
+                        result.get('duration_outliers') if exclude_duration_outliers else None,
+                    )
+                    valid_mv_mask = np.isfinite(minute_ventilation_values) & ~invalid_cycles
 
-                        # Clean per-cycle arrays with NaN in place of outliers
-                    tv_clean = result['tidal_volumes'][:min_len].copy().astype(float)
-                    tv_clean[~valid_mv_mask] = np.nan
-                    result['tidal_volumes_clean'] = tv_clean
+                    # Clean per-cycle arrays with NaN in place of invalid cycles
+                    result['tidal_volumes_clean']             = _blank_invalid(result['tidal_volumes'][:min_len], ~valid_mv_mask)
+                    result['minute_ventilation_values_clean'] = _blank_invalid(minute_ventilation_values,         ~valid_mv_mask)
 
-                    mv_clean = minute_ventilation_values.copy().astype(float)
-                    mv_clean[~valid_mv_mask] = np.nan
-                    result['minute_ventilation_values_clean'] = mv_clean
+                    if valid_mv_mask.any():
+                        result['mean_minute_ventilation'] = float(np.mean(minute_ventilation_values[valid_mv_mask]))
 
-                    valid_mv_inds = np.where(valid_mv_mask)[0]
-                    if len(valid_mv_inds) > 0:
-                        result['mean_minute_ventilation'] = float(np.mean(minute_ventilation_values[valid_mv_inds]))
+        # Precomputed "currently excluded" masks honoring exclude_* flags.
+        # Frozen at process-time — toggling the exclude_* checkboxes without re-running
+        # will not update these. Constituents (inhale_outliers, duration_outliers, etc.)
+        # are still available for callers that need the raw per-source breakdown.
+        dur_component = result.get('duration_outliers') if exclude_duration_outliers else None
+        for key_prefix in ('inhale', 'exhale', 'tidal'):
+            outliers = result.get(f'{key_prefix}_outliers')
+            if outliers is None:
+                continue
+            vol_component = outliers if exclude_outliers else None
+            result[f'{key_prefix}_excluded'] = _build_outlier_mask(len(outliers), vol_component, dur_component)
+
+        # Scalar outlier counts — convenience for scripts that summarise across subjects.
+        if 'tidal_outliers' in result:
+            result['n_breaths'] = int(len(result['tidal_outliers']))
+        for key in ('inhale_outliers', 'exhale_outliers', 'tidal_outliers',
+                    'tidal_outliers_low', 'tidal_outliers_high', 'duration_outliers'):
+            if key in result:
+                result[f'n_{key}'] = int(np.sum(result[key]))
 
         return result
 

@@ -2863,7 +2863,8 @@ def main():
         tabs.append("SpO2")
     if doppler_enabled:
         tabs.append("Doppler")
-    if session_a_selected:
+    spirometry_tab_enabled = session_a_selected and ('spirometer' in detected_signals)
+    if spirometry_tab_enabled:
         tabs.append("Spirometry")
     tabs.append("Export")
 
@@ -4910,12 +4911,12 @@ def main():
 
 
     # --- SPIROMETRY TAB (Session A) ---
-    if session_a_selected:
+    if spirometry_tab_enabled:
         with tab_objects[tab_idx]:
             st.header("Spirometry")
             render_experiment_notes_panel(st.session_state.get('task'), st.session_state.get('subject_metadata'))
 
-            col1, col2, col3 = st.columns([2, 1, 1])
+            col1, col2 = st.columns([2, 1])
 
             with col1:
                 st.subheader("BreathMetrics Parameters")
@@ -4982,17 +4983,8 @@ def main():
                     disabled=not exclude_duration_outliers,
                 )
 
-            with col2:
-                st.subheader("Info")
-                st.info("""
-                **BreathMetrics** provides comprehensive respiratory analysis including:
-                - Peak/trough detection
-                - Volume calculations
-                - Duration measurements
-                - Advanced cycle analysis
-                """)
 
-            with col3:
+            with col2:
                 st.write("")
                 st.write("")
                 process_breathmetrics_clicked = st.button(
@@ -5003,88 +4995,74 @@ def main():
                 )
 
             if process_breathmetrics_clicked:
-                # Check if we have respiratory data available
-                # Look for spirometer channel first, then rsp as fallback
-                signal_key = None
-                if 'spirometer' in detected_signals:
-                    signal_key = 'spirometer'
+                signal = data['df'][data['signal_mappings']['spirometer']].values
+
+                params = {
+                    'data_type': data_type,
+                    'zscore': 1 if zscore else 0,
+                    'baseline_method': baseline_method,
+                    'simplify': 1 if simplify else 0,
+                    'verbose': 0,
+                    'exclude_outliers': 1 if exclude_outliers else 0,
+                    'volume_outlier_sd': volume_outlier_sd,
+                    'exclude_duration_outliers': 1 if exclude_duration_outliers else 0,
+                    'duration_outlier_sd': duration_outlier_sd,
+                }
+                st.session_state.spirometry_params.update(params)
+
+                with st.spinner("Processing with BreathMetrics..."):
+                    result = spirometry.process_breathmetrics(signal, sampling_rate, st.session_state.spirometry_params)
+
+                if result is None:
+                    st.error("BreathMetrics processing failed")
                 else:
-                    st.error("No respiratory signal found (spirometer)")
-                    signal_key = None
-
-                if signal_key:
-                    signal = data['df'][data['signal_mappings'][signal_key]].values
-
-                    params = {
-                        'data_type': data_type,
-                        'zscore': 1 if zscore else 0,
-                        'baseline_method': baseline_method,
-                        'simplify': 1 if simplify else 0,
-                        'verbose': 0,
-                        'exclude_outliers': 1 if exclude_outliers else 0,
-                        'volume_outlier_sd': volume_outlier_sd,
-                        'exclude_duration_outliers': 1 if exclude_duration_outliers else 0,
-                        'duration_outlier_sd': duration_outlier_sd,
-                    }
-                    st.session_state.spirometry_params.update(params)
-
-                    with st.spinner("Processing with BreathMetrics..."):
-                        result = spirometry.process_breathmetrics(signal, sampling_rate, st.session_state.spirometry_params)
-
-                    if result is None:
-                        st.error("BreathMetrics processing failed")
-                    else:
-                        st.session_state.spirometry_result = result
-                        st.success("BreathMetrics processing completed!")
-                        st.rerun()
+                    st.session_state.spirometry_result = result
+                    st.success("BreathMetrics processing completed!")
+                    st.rerun()
 
             # Display results
             if st.session_state.spirometry_result is not None:
                 result = st.session_state.spirometry_result
 
-                # Build outlier mask helper once, used by both summary metrics and plots
+                # plot_exclude_* drive the colour-coded scatter plots below, which use
+                # the raw constituent masks for a 4-way regular/vol/dur/both split.
                 plot_exclude_outliers = bool(st.session_state.spirometry_params.get('exclude_outliers', 0))
                 plot_exclude_duration_outliers = bool(st.session_state.spirometry_params.get('exclude_duration_outliers', 0))
-                has_outlier_info = 'tidal_outliers' in result and len(result['tidal_outliers']) > 0
-                has_duration_outlier_info = 'duration_outliers' in result and len(result['duration_outliers']) > 0
-
-                def outlier_valid_mask(n, nan_mask=None):
-                    """Return boolean valid mask of length n, excluding outliers if enabled.
-
-                    tidal_outliers and duration_outliers may be shorter than n (e.g.
-                    rate_values has one entry per breath interval, volumes have one per
-                    cycle — these can differ by 1). Cycles beyond the known outlier info
-                    are treated as non-outliers rather than raising a shape mismatch.
-                    """
-                    mask = np.ones(n, dtype=bool)
-                    if plot_exclude_outliers and has_outlier_info:
-                        outliers = result['tidal_outliers']
-                        n_known = min(n, len(outliers))
-                        mask[:n_known] &= ~outliers[:n_known]
-                    if plot_exclude_duration_outliers and has_duration_outlier_info:
-                        outliers = result['duration_outliers']
-                        n_known = min(n, len(outliers))
-                        mask[:n_known] &= ~outliers[:n_known]
-                    if nan_mask is not None:
-                        mask = mask & ~nan_mask
-                    return mask
 
                 st.divider()
                 st.subheader("Analysis Results")
+
+                # Recompute the three volume means from a single shared "clean cycle" mask
+                # so they stay internally consistent (mean_tidal == mean_inhale + mean_exhale).
+                # spirometry.py already builds `tidal_excluded` by OR'ing volume + duration
+                # outlier flags (gated on the exclude_* checkboxes at process time); we just
+                # need to additionally drop NaN cycles. When manual breath-cycle removal lands,
+                # OR the manual mask into `clean_cycles` here and the displayed means will
+                # update in lockstep.
+                inhale_vols_arr = np.asarray(result.get('inhale_volumes', []), dtype=float)
+                exhale_vols_arr = np.asarray(result.get('exhale_volumes', []), dtype=float)
+                vol_min_len = min(len(inhale_vols_arr), len(exhale_vols_arr))
+                if vol_min_len > 0:
+                    inh_t = inhale_vols_arr[:vol_min_len]
+                    exh_t = exhale_vols_arr[:vol_min_len]
+                    tidal_excluded_arr = np.asarray(
+                        result.get('tidal_excluded', np.zeros(vol_min_len, dtype=bool))
+                    )[:vol_min_len]
+                    clean_cycles = np.isfinite(inh_t) & np.isfinite(exh_t) & ~tidal_excluded_arr
+                    if clean_cycles.any():
+                        mean_inhale = float(np.mean(inh_t[clean_cycles]))
+                        mean_exhale = float(np.mean(exh_t[clean_cycles]))
+                        mean_tidal  = float(np.mean(((inh_t + exh_t) / 2.0)[clean_cycles]))
+                    else:
+                        mean_inhale = mean_exhale = mean_tidal = None
+                else:
+                    mean_inhale = mean_exhale = mean_tidal = None
 
                 # Metrics overview
                 col1, col2, col3, col4, col5, col6 = st.columns(6)
                 with col1:
                     n_cycles = len(result.get('current_peaks', []))
-                    # Count outliers based on which removal options are active
-                    combined_outliers = np.zeros(n_cycles, dtype=bool)
-                    if plot_exclude_outliers and 'tidal_outliers' in result:
-                        n = min(n_cycles, len(result['tidal_outliers']))
-                        combined_outliers[:n] |= result['tidal_outliers'][:n]
-                    if plot_exclude_duration_outliers and 'duration_outliers' in result:
-                        n = min(n_cycles, len(result['duration_outliers']))
-                        combined_outliers[:n] |= result['duration_outliers'][:n]
-                    n_outliers = int(np.sum(combined_outliers))
+                    n_outliers = int(result.get('n_tidal_outliers', 0))
                     st.metric("Detected Cycles", f"{n_cycles} ({n_outliers} outliers)")
                 with col2:
                     if 'breathing_rate_bpm' in result:
@@ -5092,23 +5070,23 @@ def main():
                     else:
                         st.metric("Breathing Rate", "N/A")
                 with col3:
-                    if 'mean_inhale_volume' in result:
-                        st.metric("Mean Inhale Volume", f"{result['mean_inhale_volume']:.2f}")
+                    if mean_inhale is not None:
+                        st.metric("Mean Inhale Volume", f"{mean_inhale:.2f}")
                     else:
                         st.metric("Mean Inhale Volume", "N/A")
                 with col4:
-                    if 'mean_exhale_volume' in result:
-                        st.metric("Mean Exhale Volume", f"{result['mean_exhale_volume']:.2f}")
+                    if mean_exhale is not None:
+                        st.metric("Mean Exhale Volume", f"{mean_exhale:.2f}")
                     else:
                         st.metric("Mean Exhale Volume", "N/A")
                 with col5:
-                    if 'mean_tidal_volume' in result:
-                        st.metric("Mean Tidal Volume", f"{result['mean_tidal_volume']:.2f}")
+                    if mean_tidal is not None:
+                        st.metric("Mean Tidal Volume", f"{mean_tidal:.2f}")
                     else:
                         st.metric("Mean Tidal Volume", "N/A")
                 with col6:
                     if 'mean_minute_ventilation' in result:
-                        st.metric("Mean Minute Ventilation", f"{result['mean_minute_ventilation']/1000:.2f} L/min")
+                        st.metric("Mean Minute Ventilation", f"{result['mean_minute_ventilation']:.2f} L/min")
                     else:
                         st.metric("Mean Minute Ventilation", "N/A")
 
@@ -5138,17 +5116,16 @@ def main():
                     go.Scatter(x=time, y=result['clean'], name='Smoothed', line=dict(color='#00D4FF', width=2)),
                     row=1, col=1
                 )
-                if 'baseline_corrected' in result:
-                    fig.add_trace(
-                        go.Scatter(x=time, y=result['baseline_corrected'], name='Baseline Corrected',
-                                 line=dict(color='#FF6B6B', width=1.5, dash='dot')),
-                        row=1, col=1
-                    )
+                fig.add_trace(
+                    go.Scatter(x=time, y=result['baseline_corrected'], name='Baseline Corrected',
+                                line=dict(color='#FF6B6B', width=1.5, dash='dot')),
+                    row=1, col=1
+                )
 
                 fig.update_yaxes(title_text="Airflow (units)", row=1, col=1)
 
                 # Row 2: With peaks/troughs
-                signal_row2 = result['baseline_corrected'] if 'baseline_corrected' in result else result['clean']
+                signal_row2 = result['baseline_corrected']
                 fig.add_trace(
                     go.Scatter(x=time, y=signal_row2, name='Signal', line=dict(color='#00D4FF', width=1.5), showlegend=False),
                     row=2, col=1
@@ -5286,7 +5263,7 @@ def main():
                                      marker=dict(color='purple', size=6)),
                             row=5, col=1
                         )
-                        fig.update_yaxes(title_text="Minute Ventilation (mL/min)", row=5, col=1)
+                        fig.update_yaxes(title_text="Minute Ventilation (L/min)", row=5, col=1)
 
                 fig.update_layout(height=1500, template='plotly_dark', showlegend=True)
                 fig.update_xaxes(title_text="Time (s)", matches='x')
@@ -5324,7 +5301,7 @@ def main():
                             if 'exhale_durations' in result and i < len(result['exhale_durations']):
                                 cycle_data['Exhale Duration (s)'] = result['exhale_durations'][i]
                             if 'minute_ventilation_values' in result and i < len(result['minute_ventilation_values']):
-                                cycle_data['Minute Ventilation'] = result['minute_ventilation_values'][i]
+                                cycle_data['Minute Ventilation (L/min)'] = result['minute_ventilation_values'][i]
 
                             if len(cycle_data) > 1:  # Only add if we have data beyond cycle number
                                 metrics_data.append(cycle_data)
